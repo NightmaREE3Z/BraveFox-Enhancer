@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExtraRedirect
-// @version      1.6.15
-// @description  Extra redirects and removes unwanted elements on Instagram and TikTok.
+// @version      1.6.23-no-filtered-text
+// @description  Extra redirects and hides unwanted elements on Instagram and TikTok (no "Filtered" text, prevents flicker/whiteout).
 // @match        *://irc-galleria.net/user/*
 // @match        *://www.instagram.com/*
 // @match        *://www.instagram.com/?next=%2F/*
@@ -15,11 +15,8 @@
 (function() {
     'use strict';
 
-    let currentURL = window.location.href;
-    console.log(`Current URL: ${currentURL}`);
-
     const bannedKeywords = [
-	"Alexa", "Bliss", "Alexa Bliss", "Tiffany", "Tiffy", "Stratton", "Chelsea Green", "Bayley", "Blackheart", "Mercedes", "Alba Fyre", "sensuel", "Maryse",
+        "Alexa", "Bliss", "Alexa Bliss", "Tiffany", "Tiffy", "Stratton", "Chelsea Green", "Bayley", "Blackheart", "Mercedes", "Alba Fyre", "sensuel", "Maryse",
         "Becky Lynch", "Michin", "Mia Yim", "#satan666", "julmakira", "Stephanie", "Liv Morgan", "Piper Niven", "sensuel", "queer", "Pride", "NXT Womens", "model",
         "Jordynne", "Woman", "Women", "@tiffanywwe", "@yaonlylivvonce", "@alexa_bliss_wwe_", "@alexa_bliss", "@samanthathebomb", "Women's", "Woman's", "Summer Rae", "Mia Yim",
         "Naomi", "Bianca Belair", "Charlotte", "Jessika Carr", "Carr WWE", "Jessica Karr", "bikini", "Kristen Stewart", "Sydney Sweeney", "Piper Niven", "Nia Jax",
@@ -35,12 +32,17 @@
         "Valhalla", "IYO SKY", "Shirai", "Io Sky", "Iyo Shirai", "Dakota Kai", "wiikmaaan", "Asuka", "Kairi Sane", "Meiko Satomura", "NXT Women", "Russo", "underwear", "Rule 34",
         "Miko Satomura", "Sarray", "Xia Li", "Shayna Baszler", "Ronda Rousey", "Dana Brooke", "Izzi Dame", "Tamina", "Alicia Fox", "Madison Rayne", "Saraya", "attire", "only fans",
         "Layla", "Michelle McCool", "Eve Torres", "Kelly", "Melina WWE", "Jillian Hall", "Mickie James", "Su Yung", "Britt", "Nick Jackson", "Matt Jackson", "fan time",
-        "Maria Kanellis", "Beth Phoenix", "Victoria WWE", "Molly Holly", "Gail Kim", "Awesome Kong", "Deonna Purrazzo", "Anna Jay", "Riho", "Britney", "Nyla Rose",
+        "Maria Kanellis", "Beth Phoenix", "Victoria WWE", "Molly Holly", "Gail Kim", "Awesome Kong", "Deonna Purrazzo", "Anna Jay", "Riho", "Britney", "Nyla Rose", 
         "Angelina Love", "Tessmacher", "Havok", "Taya Valkyrie", "Valkyria", "Tay Melo", "Willow Nightingale", "Statlander", "Hikaru Shida", "rule34", "Sasha", "AEW",
         "Penelope Ford", "Shotzi", "Tegan", "Nox", "Stephanie", "Sasha Banks", "Sakura", "Tessa", "Brooke", "Jakara", "Alba Fyre", "Isla Dawn", "Scarlett Bordeaux",
         "B-Fab", "Kayden Carter", "Katana Chance", "Lyra Valkyria", "Indi Hartwell", "Blair Davenport", "Maxxine Dupri", "China", "Russia", "Natalya", "Sakazaki",
         "Karmen Petrovic", "Ava Raine", "Cora Jade", "Jacy Jayne", "Gigi Dolin", "Thea Hail", "Tatum WWE", "Paxley", "Fallon Henley", "Nattie", "escort", "Sol Ruca",
         "Kelani Jordan", "Electra Lopez", "Wendy Choo", "Yulisa Leon", "Valentina Feroz", "Amari Miller", "Arianna Grace", "Lana", "CJ Perry", "Perry", "Del Rey"
+    ];
+
+    // Regex array for case-insensitive matches, e.g. "AI"
+    const bannedRegexes = [
+        /\bAI\b/i, /\bMLM\b/i, 
     ];
 
     const allowedWords = [
@@ -50,14 +52,14 @@
     const instagramBannedPaths = [
         'karabrannbacka',
         'piia_oksanen',
-	'wiikmaaan',
+        'wiikmaaan',
         'p/Cpz9H4UtG1Q',
         'p/Cu6cV9zN-CH',
         'p/CyA6BJpNzgu',
         'instagram.com/julmakira',
-	'instagram.com/wiikmaaan',
+        'instagram.com/wiikmaaan',
         'julmakira',
-        'p/B3RXztzhj6E'
+        'p/B3RXztzhj6E',
     ];
 
     const excludedPaths = [
@@ -73,8 +75,8 @@
     const protectedElements = [
         'div[aria-describedby="Viesti"][aria-label="Viesti"].xzsf02u.x1a2a7pz.x1n2onr6.x14wi4xw.x1iyjqo2.x1gh3ibb.xisnujt.xeuugli.x1odjw0f.notranslate',
         'div[aria-describedby="Viesti"][aria-label="Viesti"].xzsf02u.x1a2a7pz.x1n2onr6.x14wi4xw.x1iyjqo2.x1gh3ibb.xisnujt.xeuugli.x1odjw0f.notranslate[role="textbox"][spellcheck="true"]',
-        'textarea[placeholder="Message..."]', // Adding the textarea for message input
-        'button[type="submit"]', // Adding the submit button for sending messages
+        'textarea[placeholder="Message..."]',
+        'button[type="submit"]',
         'div.x1qjc9v5.x1yvgwvq.x1dqoszc.x1ixjvfu.xhk4uv.x1ke7ulo.x3jqge.x1i7howy.x4y8mfe.x13fuv20.xu3j5b3.x1q0q8m5.x26u7qi.x178xt8z.xm81vs4.xso031l.xy80clv.x78zum5.xdt5ytf.xw7yly9.xktsk01.x1yztbdb.x1d52u69',
         'div.x6s0dn4.x78zum5.x1gg8mnh.x1pi30zi.xlu9dua',
         'div.x9f619.xjbqb8w.x78zum5.x168nmei.x13lgxp2.x5pf9jr.xo71vjh.x1uhb9sk.x1plvlek.xryxfnj.x1c4vz4f.x2lah0s.xdt5ytf.xqjyukv.x1qjc9v5.x1nhvcw1.xpvyfi4.xzueoph',
@@ -99,13 +101,13 @@
         'div[aria-label="Viesti"], textarea[placeholder="Message..."], svg[aria-label="Valitse emoji"]'
     ];
 
-    const selectorsToDelete = [
+    const selectorsToHide = [
         '.x1azxncr > .x1qrby5j.x7ja8zs.x1t2pt76.x1lytzrv.xedcshv.xarpa2k.x3igimt.x12ejxvf.xaigb6o.x1beo9mf.xv2umb2.x1jfb8zj.x1h9r5lt.x1h91t0o.x4k7w5x > .x1n2onr6 > ._a6hd.x1a2a7pz.xggy1nq.x1hl2dhg.x16tdsg8.xkhd6sd.x18d9i69.x4uap5.xexx8yu.x1mh8g0r.xat24cr.x11i5rnm.xdj266r.xe8uvvx.xt0psk2.x1ypdohk.x9f619.xm0m39n.x1qhh985.xcfux6l.x972fbf.x17r0tee.x1sy0etr.x1ejq31n.xjbqb8w.x1i10hfl',
         '.xvbhtw8.x1j7kr1c.x169t7cy.xod5an3.x11i5rnm.xdj266r.xdt5ytf.x78zum5',
         '.wbloks_79.wbloks_1 > .wbloks_1 > .wbloks_1 > .wbloks_1 > div.wbloks_1',
         '.x1ye3gou.x1l90r2v.xn6708d.x1y1aw1k.xl56j7k.x1qx5ct2.x78zum5.x6s0dn4',
-        '.x1nhvcw1.x1oa3qoh.x1qjc9v5.xqjyukv.xdt5ytf.x2lah0s.x1c4vz4f.xryxfnj.x1plvlek.x1uhb9sk.xo71vjh.x5pf9jr.x13lgxp2.x168nmei.x78zum5.xjbqb8w.x9f619 > div > div > .xnc8uc2.x11aubdm.xso031l.x1q0q8m5.x1bs97v6',
-        '.x2qib4z.xcu9agk.xd7y6wv.x78zum5.xg6i1s1.x1rp6h8o.x1fglp.xdxvlk3.x1hmx34t.x6s0dn4.x1a2a7pz.x1lku1pv.x87ps6o.x1q0g3np.x1t137rt.x1ja2u2z.xggy1nq.x1hl2dhg.x16tdsg8.x1n2onr6.x18d9i69.xexx8yu.xeuugli.x2lah0s.x1mh8g0r.xat24cr.x11i5rnm.xdj266r.xe8uvvx.x2lah0s.xdl72j9.x9f619.xm0m39n.x1qhh985.xcfux6l.x972fbf.x26u7qi.x1q0q8m5.xu3j5b3.x13fuv20.x2hbi6w.xqeqjp1.xa49m3k.xjqpnuy.x1i10hfl',
+        '.x1nhvcw1.x1oa3qoh.x1qjc9v5.xqjyukv.xdt5ytf.x2lah0s.x1c4vz4f.xryxfnj.x1plvlek.xo71vjh.x5pf9jr.x13lgxp2.x168nmei.x78zum5.xjbqb8w.x9f619 > div > div > .xnc8uc2.x11aubdm.xso031l.x1q0q8m5.x1bs97v6',
+        '.x2qib4z.xcu9agk.xd7y6wv.x78zum5.xg6i1s1.x1rp6h8o.x1fglp.xdxvlk3.x1hmx34t.x6s0dn4.x1a2a7pz.x1lku1pv.x87ps6o.x1q0g3np.x1t137rt.x1ja2u2z.xggy1nq.x1hl2dhg.x16tdsg8.x1n2onr6.x18d9i69.xexx8yu.xeuugli.x2lah0s.x1mh8g0r.xat24cr.x11i5rnm.xdj266r.xe8uvvx.x2lah0s.xdl72j9.x9f619.xm0m39n.x1qhh985.xcfux6l.x972fbf.x26u7qi.x1q0g3np.xu3j5b3.x13fuv20.x2hbi6w.xqeqjp1.xa49m3k.xjqpnuy.x1i10hfl',
         'div.x1nhvcw1.x1oa3qoh.x1qjc9v5.xqjyukv.xdt5ytf.x2lah0s.x1c4vz4f.xryxfnj.x1plvlek.x1n2onr6.x1emribx.x1i64zmx.xod5an3.xo71vjh.x5pf9jr.x13lgxp2.x168nmei.x78zum5.xjbqb8w.x9f619:nth-of-type(11)',
         '.x1azxncr > .x1qrby5j.x7ja8zs.x1t2pt76.x1lytzrv.xedcshv.xarpa2k.x3igimt.x12ejxvf.xaigb6o.x1beo9mf.xv2umb2.x1jfb8zj.x1h9r5lt.x1h91t0o.x4k7w5x > .x78zum5.x6s0dn4.x1n2onr6 > ._a6hd.x1a2a7pz.xggy1nq.x1hl2dhg.x16tdsg8.xkhd6sd.x18d9i69.x4uap5.xexx8yu.x1mh8g0r.xat24cr.x11i5rnm.xdj266r.xe8uvvx.xt0psk2.x1ypdohk.x9f619.xm0m39n.x1qhh985.xcfux6l.x972fbf.x17r0tee.x1sy0etr.x1ejq31n.xjbqb8w.x1i10hfl',
         '.xfex06f > div:nth-child(3)',
@@ -169,228 +171,248 @@
         "Sinulle Ehdotettua"
     ];
 
-    const deleteElementsByBannedPhrases = (phrases) => {
-        document.querySelectorAll('*').forEach(element => {
-            if (!isExcludedPath()) {
-                const textContent = element.textContent?.toLowerCase();
-                if (textContent) {
-                    phrases.forEach(phrase => {
-                        if (textContent.includes(phrase.toLowerCase())) {
-                            console.log(`Removing element containing banned phrase: ${phrase}`);
-                            element.remove();
-                        }
-                    });
+    let currentURL = window.location.href;
+    const hiddenElements = new WeakSet();
+    const bannedKeywordsLower = bannedKeywords.map(k => k.toLowerCase());
+    const instagramBannedPathsLower = instagramBannedPaths.map(p => p.toLowerCase());
+    const allowedWordsLower = allowedWords.map(w => w.toLowerCase());
+
+    function collapseElement(element) {
+        if (!hiddenElements.has(element)) {
+            element.style.setProperty('display', 'none', 'important');
+            element.style.setProperty('max-height', '0', 'important');
+            element.style.setProperty('height', '0', 'important');
+            element.style.setProperty('min-height', '0', 'important');
+            element.style.setProperty('overflow', 'hidden', 'important');
+            element.style.setProperty('padding', '0', 'important');
+            element.style.setProperty('margin', '0', 'important');
+            element.style.setProperty('border', 'none', 'important');
+            element.style.setProperty('visibility', 'hidden', 'important');
+            element.style.setProperty('flex', '0 0 0px', 'important');
+            element.style.setProperty('grid', 'none', 'important');
+            element.style.setProperty('transition', 'none', 'important');
+            hiddenElements.add(element);
+        }
+    }
+
+    function collapseElementsBySelectors(selectors) {
+        const allSelectors = selectors.join(',');
+        document.querySelectorAll(allSelectors).forEach(element => {
+            if (hiddenElements.has(element)) return;
+            const isProtected = protectedElements.some(protectedSelector => {
+                try { return element.matches(protectedSelector); } catch { return false; }
+            });
+            const containsAllowedWords = allowedWordsLower.some(word =>
+                element.textContent && element.textContent.toLowerCase().includes(word)
+            );
+            if (!isProtected && !containsAllowedWords && !isExcludedPath()) {
+                collapseElement(element);
+            }
+        });
+    }
+
+    function collapseElementsByKeywordsOrPaths(keywords, paths, selectors) {
+        const allSelectors = selectors.join(',');
+        document.querySelectorAll(allSelectors).forEach(element => {
+            if (hiddenElements.has(element)) return;
+            const isProtected = protectedElements.some(protectedSelector => {
+                try { return element.matches(protectedSelector); } catch { return false; }
+            });
+            if (isProtected) return;
+            const textContent = element.textContent ? element.textContent.toLowerCase() : "";
+            let matched = false;
+            for (let i = 0; i < bannedKeywordsLower.length; ++i) {
+                if (textContent.includes(bannedKeywordsLower[i])) {
+                    matched = true;
+                    break;
+                }
+            }
+            for (let i = 0; i < instagramBannedPathsLower.length; ++i) {
+                if (textContent.includes(instagramBannedPathsLower[i])) {
+                    matched = true;
+                    break;
+                }
+            }
+            // Regex matching (case-insensitive)
+            if (!matched) {
+                for (let i = 0; i < bannedRegexes.length; ++i) {
+                    if (bannedRegexes[i].test(element.textContent)) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if (matched) {
+                const parentArticle = element.closest('article');
+                if (parentArticle && !hiddenElements.has(parentArticle)) {
+                    const containsAllowedWords = allowedWordsLower.some(word =>
+                        parentArticle.textContent && parentArticle.textContent.toLowerCase().includes(word)
+                    );
+                    if (!containsAllowedWords && !isExcludedPath()) {
+                        Array.from(parentArticle.children).forEach(child => {
+                            child.style.setProperty('display', 'none', 'important');
+                        });
+                        hiddenElements.add(parentArticle);
+                    }
                 }
             }
         });
-    };
+    }
 
-    const isExcludedPath = () => {
-        const result = excludedPaths.some(path => currentURL.includes(path));
-        console.log(`Excluded Path Check: ${result} for URL: ${currentURL}`);
-        return result;
-    };
-
-    const deleteElementsBySelectors = (selectors) => {
-        selectors.forEach(selector => {
-            document.querySelectorAll(selector).forEach(element => {
-                const isProtected = protectedElements.some(protectedSelector => element.matches(protectedSelector));
-                const containsAllowedWords = allowedWords.some(word => element.textContent && element.textContent.toLowerCase().includes(word.toLowerCase()));
-                if (!isProtected && !containsAllowedWords && !isExcludedPath()) {
-                    element.remove();
-                }
-            });
-        });
-    };
-
-    const deleteElementsByKeywordsOrPaths = (keywords, paths, selectors) => {
-        selectors.forEach(selector => {
-            document.querySelectorAll(selector).forEach(element => {
-                const isProtected = protectedElements.some(protectedSelector => element.matches(protectedSelector));
-                if (isProtected) return;
-
-                keywords.forEach(keyword => {
-                    if (element.textContent && element.textContent.toLowerCase().includes(keyword.toLowerCase())) {
-                        const parentArticle = element.closest('article');
-                        if (parentArticle) {
-                            const containsAllowedWords = allowedWords.some(word => parentArticle.textContent.toLowerCase().includes(word.toLowerCase()));
-                            if (!containsAllowedWords && !isExcludedPath()) {
-                                parentArticle.remove();
-                            }
-                        }
-                    }
-                });
-
-                paths.forEach(path => {
-                    if (element.textContent && element.textContent.toLowerCase().includes(path.toLowerCase())) {
-                        const parentArticle = element.closest('article');
-                        if (parentArticle) {
-                            const containsAllowedWords = allowedWords.some(word => parentArticle.textContent.toLowerCase().includes(word.toLowerCase()));
-                            if (!containsAllowedWords && !isExcludedPath()) {
-                                parentArticle.remove();
-                            }
-                        }
-                    }
-                });
-            });
-        });
-    };
-
-    const deleteElementsOnExcludedPaths = () => {
+    function collapseElementsOnExcludedPaths() {
         if (!isExcludedPath()) return;
-
-        console.log("Deleting elements specific to excluded paths.");
-        selectorsForExcludedPaths.forEach(selector => {
-            document.querySelectorAll(selector).forEach(element => {
-                element.remove();
-            });
+        const allSelectors = selectorsForExcludedPaths.join(',');
+        document.querySelectorAll(allSelectors).forEach(element => {
+            collapseElement(element);
         });
-    };
+    }
 
-    const handleIRCGalleriaRedirection = () => {
-        if (!currentURL.includes('irc-galleria.net')) return;
+    function isExcludedPath() {
+        return excludedPaths.some(path => currentURL.indexOf(path) !== -1);
+    }
 
-        console.log('Detected IRC-Galleria site.');
-
-        const imageIdsToRedirect = [
-            '129640994', '129640992', '129580627', '129640995', '129559690', '129640997', '129640991', '130016541', '129804009', '129684375'
-        ];
-
-        const checkAndRedirectImage = () => {
-            const url = window.location.href;
-            const imageIdMatch = url.match(/\/picture\/(\d+)$/);
-
-            if (imageIdMatch) {
-                const imageId = imageIdMatch[1];
-                if (imageIdsToRedirect.includes(imageId)) {
-                    console.log(`Redirecting image ${imageId} to the front page.`);
-                    window.location.replace('https://irc-galleria.net');
-                }
-            }
-        };
-
-        const deleteInitialSelectors = () => {
-            const selectorsToDelete = [
-                '#thumb_div_129640995',
-                '#thumb_div_129640994',
-                '#thumb_div_129640992',
-                '#thumb_div_129580627',
-                '#thumb_div_129640995',
-                '#thumb_div_129559690',
-                '#thumb_div_129640997',
-                '#thumb_div_129640991',
-                '#thumb_div_129684375',
-                '#thumb_div_130016541',
-                '#thumb_div_129804009',
-                '#image-129684375-image',
-                '#image-129640994-image',
-                '#image-129640992-image',
-                '#image-129580627-image',
-                '#image-129640995-image',
-                '#image-129559690-image',
-            ];
-
-            selectorsToDelete.forEach(selector => {
-                document.querySelectorAll(selector).forEach(element => element.remove());
-            });
-        };
-
-        const init = () => {
-            checkAndRedirectImage();
-            deleteInitialSelectors();
-        };
-
-        window.addEventListener('DOMContentLoaded', init);
-        window.addEventListener('load', init);
-    };
-
-// ---- GITHUB REDIRECTOR FUNCTION ----
-let githubRedirected = false;
-function handleGitHubRedirect() {
-    if (githubRedirected) return;
-    const currentURL = window.location.href;
-    const blockedRepos = [
-        'Firefox-Enhancer',
-        'BraveFox-Enhancer',
-        'MV3-Download-Manager',
-        'DownloadsMV2FF'
+    const ircGalleriaBannedPatterns = [
+        'Irpp4/album?page=1',
+        'picture/129640994', 'picture/129640992', 'picture/129262368', 'picture/129580627',
+        'picture/129640995', 'picture/129559690', 'picture/129640997', 'picture/129640991',
+        'picture/130016541', 'picture/129804009', 'picture/129684375', 'picture/128593982'
     ];
 
-    const isProfileRoot = /^https:\/\/github\.com\/NightmaREE3Z\/?$/.test(currentURL);
-    const repoMatch = currentURL.match(/^https:\/\/github\.com\/NightmaREE3Z\/([^\/#?]+)/);
-
-    if (isProfileRoot) {
-        githubRedirected = true;
-        console.log('GitHub Redirect: Blocked profile root');
-        window.location.replace('https://github.com');
-        return;
+    if (currentURL.includes('irc-galleria.net')) {
+        for (let pattern of ircGalleriaBannedPatterns) {
+            if (currentURL.includes(pattern)) {
+                window.stop();
+                window.location.replace('https://irc-galleria.net');
+                return;
+            }
+        }
     }
-    if (repoMatch && blockedRepos.includes(repoMatch[1])) {
-        githubRedirected = true;
-        console.log('GitHub Redirect: Blocked repo: ' + repoMatch[1]);
-        window.location.replace('https://github.com');
-        return;
-    }
-}
-    // ---- END GITHUB REDIRECTOR FUNCTION ----
 
-    const handleRedirectionsAndContentRemoval = () => {
+    function handleIRCGalleriaThumbDeletion() {
+        if (!currentURL.includes('irc-galleria.net')) return;
+        const selectorsToDelete = [
+            '#thumb_div_129640995',
+            '#thumb_div_129640994',
+            '#thumb_div_129640992',
+            '#thumb_div_129580627',
+            '#thumb_div_129640995',
+            '#thumb_div_129559690',
+            '#thumb_div_129640997',
+            '#thumb_div_129640991',
+            '#thumb_div_129684375',
+            '#thumb_div_130016541',
+            '#thumb_div_129804009',
+            '#thumb_div_129262368',
+            '#thumb_div_128593982',
+            '#image-129684375-image',
+            '#image-129640994-image',
+            '#image-129640992-image',
+            '#image-129580627-image',
+            '#image-129640995-image',
+            '#image-129262368-image',
+            '#image-129559690-image',
+            '#image-128593982-image',
+        ];
+        selectorsToDelete.forEach(selector => {
+            document.querySelectorAll(selector).forEach(element => element.remove());
+        });
+    }
+
+    let githubRedirected = false;
+    function handleGitHubRedirect() {
+        if (githubRedirected) return;
+        const currentURL = window.location.href;
+        const blockedRepos = [
+            'Firefox-Enhancer',
+            'BraveFox-Enhancer',
+            'MV3-Download-Manager',
+            'DownloadsMV2FF'
+        ];
+
+        const isProfileRoot = /^https:\/\/github\.com\/NightmaREE3Z\/?$/.test(currentURL);
+        const repoMatch = currentURL.match(/^https:\/\/github\.com\/NightmaREE3Z\/([^\/#?]+)/);
+
+        if (isProfileRoot) {
+            githubRedirected = true;
+            window.location.replace('https://github.com');
+            return;
+        }
+        if (repoMatch && blockedRepos.includes(repoMatch[1])) {
+            githubRedirected = true;
+            window.location.replace('https://github.com');
+            return;
+        }
+    }
+
+    function handleRedirectionsAndContentHiding() {
         currentURL = window.location.href;
 
-        handleIRCGalleriaRedirection();
+        handleIRCGalleriaThumbDeletion();
 
-        // Threads → Instagram
         if (currentURL.includes('www.threads.net')) {
-            console.log('Redirecting from Threads to Instagram.');
+            window.stop();
             window.location.replace('https://www.instagram.com');
+            return;
         }
 
-        // GitHub redirects
-        handleGitHubRedirect();
+        if (currentURL.includes('github.com')) {
+            handleGitHubRedirect();
+        }
 
-        // Instagram redirect
         if (instagramBannedPaths.some(path => currentURL.includes(path))) {
-            console.log('Redirecting to Instagram home page.');
+            window.stop();
             window.location.replace('https://www.instagram.com');
+            return;
         }
 
-        // TikTok redirect
         if (currentURL.includes('@karabrannbacka')) {
-            console.log('Redirecting to TikTok home page.');
+            window.stop();
             window.location.replace('https://www.tiktok.com');
-        }
-
-        if (isExcludedPath()) {
-            console.log("Excluded path detected, skipping regular deletions.");
-            deleteElementsOnExcludedPaths();
             return;
         }
 
-        deleteElementsBySelectors(selectorsToDelete);
-        deleteElementsByKeywordsOrPaths(bannedKeywords, instagramBannedPaths, selectorsToMonitor);
-    };
-
-    const observerCallback = (mutationsList) => {
         if (isExcludedPath()) {
-            console.log("Skipping deletions and monitoring on excluded path.");
-            deleteElementsOnExcludedPaths();
+            collapseElementsOnExcludedPaths();
             return;
         }
 
-        requestAnimationFrame(() => {
-            deleteElementsBySelectors(selectorsToDelete);
-            deleteElementsByKeywordsOrPaths(bannedKeywords, instagramBannedPaths, selectorsToMonitor);
-        });
-    };
+        collapseElementsBySelectors(selectorsToHide);
+        collapseElementsByKeywordsOrPaths(bannedKeywords, instagramBannedPaths, selectorsToMonitor);
+    }
 
-    const initObserver = () => {
+    let observerScheduled = false;
+    function observerCallback(mutationsList) {
+        if (observerScheduled) return;
+        observerScheduled = true;
+        setTimeout(() => {
+            observerScheduled = false;
+            if (isExcludedPath()) {
+                collapseElementsOnExcludedPaths();
+                return;
+            }
+            collapseElementsBySelectors(selectorsToHide);
+            collapseElementsByKeywordsOrPaths(bannedKeywords, instagramBannedPaths, selectorsToMonitor);
+        }, 80);
+    }
+
+    function initObserver() {
         const observer = new MutationObserver(observerCallback);
-        document.addEventListener('DOMContentLoaded', () => {
-            observer.observe(document.body, { childList: true, subtree: true });
-        });
-    };
 
-    handleRedirectionsAndContentRemoval();
+        if (document.body) {
+            observer.observe(document.body, { childList: true, subtree: true });
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                observer.observe(document.body, { childList: true, subtree: true });
+            });
+        }
+    }
+
+    handleRedirectionsAndContentHiding();
     initObserver();
-    setInterval(handleRedirectionsAndContentRemoval, 20);
+
+    setInterval(handleRedirectionsAndContentHiding, 80);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) handleRedirectionsAndContentHiding();
+    });
+
 })();
