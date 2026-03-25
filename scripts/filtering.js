@@ -1,9 +1,8 @@
 // ==UserScript==
-// @name         FilterContent
-// @version      1.24
+// @name         General Content Filter
+// @version      20260326
 // @description  Filter out stuff on the internet
-// @match        *://*/*  
-// @grant        none
+// @match        *://*/* // @grant        none
 // ==/UserScript==
 
 (function () {
@@ -15,6 +14,10 @@
     const observerInstances = new Set();
     const processedElements = new WeakSet();
     let isCleaningUp = false;
+    
+    // --- SPA Awareness State ---
+    let __lastKnownUrl = window.location.href;
+    let isRedirectingNow = false;
 
     // Cleanup function
     function cleanup() {
@@ -99,6 +102,77 @@
 	/\bLLM\b/i,
     ]; 
 
+    // --- NEW: DYNAMIC WRESTLER BANS ---
+    function applyDynamicWrestlerBans() {
+        const storageAPI = (typeof browser !== 'undefined' && browser.storage && browser.storage.local) ? browser.storage.local : 
+                           (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+
+        if (storageAPI) {
+            try {
+                storageAPI.get(['wrestling_women_urls'], function(result) {
+                    if (result.wrestling_women_urls && Array.isArray(result.wrestling_women_urls)) {
+                        let addedCount = 0;
+                        const localExclusions = ['melina', 'melina-perez', 'aj-lee', 'aj', 'becky-lynch', 'becky'];
+
+                        result.wrestling_women_urls.forEach(url => {
+                            const parts = url.split('/').filter(Boolean);
+                            const slug = parts[parts.length - 1].toLowerCase();
+                            
+                            if (localExclusions.includes(slug)) return;
+
+                            const name = slug.replace(/-/g, ' ');
+                            const namePattern = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            
+                            const isDuplicate = blockedRegexWords.some(rx => rx.source && rx.source.includes(namePattern));
+
+                            if (!isDuplicate) {
+                                if (name.length <= 6 || !name.includes(' ')) {
+                                    blockedRegexWords.push(new RegExp('\\b' + namePattern + '\\b', 'i'));
+                                } else {
+                                    blockedRegexWords.push(new RegExp(namePattern, 'i'));
+                                }
+                                addedCount++;
+                            }
+                        });
+                        if (addedCount > 0) {
+                            console.log(`Dynamically added ${addedCount} wrestler names to blocklist.`);
+                            // Re-trigger checks immediately after async load so SPA routes aren't missed
+                            checkAndRedirectUrlBlockedContent();
+                            checkAndRedirectVideoPageBlockedContent();
+                            hideBlockedContent();
+                            deleteContent();
+                        }
+                    }
+                });
+            } catch(e) {}
+        }
+    }
+    applyDynamicWrestlerBans();
+
+    // --- NEW: Safe Redirect Helper ---
+    function safeRedirectToHome() {
+        if (isRedirectingNow) return;
+        isRedirectingNow = true;
+        
+        const homeUrl = window.location.origin + '/';
+        
+        // If we are cleanly on the homepage (no query params, no deep paths), just display none to prevent loop.
+        if (window.location.pathname === '/' && window.location.search === '') {
+            if (document.body) document.body.style.display = 'none';
+            return;
+        }
+        
+        try {
+            if (typeof window.location.replace === 'function') {
+                window.location.replace(homeUrl);
+            } else {
+                window.location.href = homeUrl;
+            }
+        } catch (e) {
+            window.location.href = homeUrl;
+        }
+    }
+
     // List of selectors to check for blocked keywords
     const videoPageSelectors = [
         '.cropped.ordered-label-list.video-tags-list.video-metadata > ul',
@@ -139,7 +213,8 @@
             });
 
             if (blockedContentFound) {
-                window.location.href = 'https://www.microsoft365.com';
+                console.log('Redirecting due to blocked content on video page');
+                safeRedirectToHome();
             }
         } catch (e) {
             console.log('Error checking video page content: ' + e.message);
@@ -150,11 +225,29 @@
     function checkAndRedirectUrlBlockedContent() {
         try {
             const urlParams = new URLSearchParams(window.location.search);
-            const searchTerm = urlParams.get('k');
+            const searchTerm = urlParams.get('k') || '';
+            const rawPath = decodeURIComponent(window.location.pathname).toLowerCase();
+            
+            // Normalize path to replace hyphens and underscores with spaces for tag/profile matching
+            const normalizedPath = rawPath.replace(/[-_+]/g, ' ');
+
+            let isBlocked = false;
+
             if (searchTerm && (blockedKeywords.some(keyword => searchTerm.toLowerCase().includes(keyword.toLowerCase())) ||
-                blockedRegexWords.some(regex => regex.test(searchTerm.toLowerCase())))) {
-                console.log(`Blocked keyword found in URL: ${searchTerm}`);
-                window.location.href = 'https://www.microsoft365.com';
+                blockedRegexWords.some(regex => regex.test(searchTerm)))) {
+                console.log(`Blocked keyword found in URL search param: ${searchTerm}`);
+                isBlocked = true;
+            }
+
+            if (!isBlocked && (blockedKeywords.some(keyword => normalizedPath.includes(keyword.toLowerCase())) ||
+                blockedRegexWords.some(regex => regex.test(normalizedPath)))) {
+                console.log(`Blocked keyword found in URL path: ${rawPath}`);
+                isBlocked = true;
+            }
+
+            if (isBlocked) {
+                console.log('Redirecting due to blocked keyword in URL');
+                safeRedirectToHome();
             }
         } catch (e) {
             console.log('Error checking URL content: ' + e.message);
@@ -254,7 +347,41 @@
         originalXhrOpen.apply(this, arguments);
     };
 
-    // Observe URL changes to check for blocked content
+    // --- NEW: Titanium SPA Awareness Hooks ---
+    function checkSPARouting() {
+        if (__lastKnownUrl !== window.location.href) {
+            __lastKnownUrl = window.location.href;
+            window.dispatchEvent(new Event('locationchange'));
+        }
+    }
+    setInterval(checkSPARouting, 70);
+
+    (function() {
+        const _wr = function(type) {
+            const orig = history[type];
+            return function() {
+                const rv = orig.apply(this, arguments);
+                window.dispatchEvent(new Event(type));
+                window.dispatchEvent(new Event('locationchange'));
+                return rv;
+            };
+        };
+        history.pushState = _wr('pushState');
+        history.replaceState = _wr('replaceState');
+        window.addEventListener('popstate', function() {
+            window.dispatchEvent(new Event('locationchange'));
+        });
+    })();
+
+    window.addEventListener('locationchange', function() {
+        checkAndRedirectVideoPageBlockedContent();
+        checkAndRedirectUrlBlockedContent();
+        hideBlockedContent();
+        deleteContent();
+        handleHomePage();
+    });
+
+    // Observe URL changes to check for blocked content (Legacy Observer)
     function observeUrlChanges() {
         let currentUrl = window.location.href;
         

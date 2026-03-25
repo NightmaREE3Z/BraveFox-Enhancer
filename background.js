@@ -246,6 +246,7 @@ const blockedSites = [
    "vivaldi.en.uptodown.com/windows",
    "uptodown.com/windows/waterfox",
    "waterfox.uptodown.com",
+   '&manualblocking=true',
    "waterfox.en.uptodown.com",
    "waterfox.en.uptodown.com/windows",
    "uptodown.com/windows/uc-browser",
