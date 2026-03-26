@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         InstaTolerable
-// @version      2026-03-25
+// @version      2026-03-26
 // @description  Trying to make my Instagram experience tolerable. 
 // @match        *://www.instagram.com/*
 // @match        *://www.instagram.com/?next=%2F/*
@@ -423,7 +423,7 @@ function getPostIDFromArticle(article) {
         'inbox',
         'direct/t',
         'stories/nightmaree3z/',
-        'stories/m1mmuska/',
+        'stories/nightmaree3z',
     ];
 
     const protectedElements = [

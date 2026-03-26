@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "BraveFox Enhancer",
-    "version": "22.4.2",
+    "version": "22.4.5",
     "description": "Makes my Interwebs experience more tolerable by filtering out content.",
     "background": {
         "service_worker": "background.js",
