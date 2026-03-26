@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         General Content Filter
-// @version      20260326
+// @version      2026-03-26
 // @description  Filter out stuff on the internet
 // @match        *://*/* // @grant        none
 // ==/UserScript==
@@ -18,6 +18,28 @@
     // --- SPA Awareness State ---
     let __lastKnownUrl = window.location.href;
     let isRedirectingNow = false;
+
+    // --- BULLETPROOF UNIVERSAL STORAGE WRAPPER ---
+    const StorageHelper = {
+        get: function(keys, callback) {
+            if (typeof browser !== 'undefined' && browser.storage && browser.storage.local) {
+                browser.storage.local.get(keys).then(callback).catch(() => callback({}));
+            } else if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(keys, callback);
+            } else {
+                callback({});
+            }
+        },
+        set: function(data, callback) {
+            if (typeof browser !== 'undefined' && browser.storage && browser.storage.local) {
+                browser.storage.local.set(data).then(() => { if (callback) callback(); }).catch(() => {});
+            } else if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set(data, () => { if (callback) callback(); });
+            } else if (callback) {
+                callback();
+            }
+        }
+    };
 
     // Cleanup function
     function cleanup() {
@@ -102,54 +124,46 @@
 	/\bLLM\b/i,
     ]; 
 
-    // --- NEW: DYNAMIC WRESTLER BANS ---
+    // --- DYNAMIC WRESTLER BANS ---
     function applyDynamicWrestlerBans() {
-        const storageAPI = (typeof browser !== 'undefined' && browser.storage && browser.storage.local) ? browser.storage.local : 
-                           (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+        StorageHelper.get(['wrestling_women_urls'], function(result) {
+            if (result.wrestling_women_urls && Array.isArray(result.wrestling_women_urls)) {
+                let addedCount = 0;
+                const localExclusions = ['melina', 'melina-perez', 'aj-lee', 'aj', 'becky-lynch', 'becky'];
 
-        if (storageAPI) {
-            try {
-                storageAPI.get(['wrestling_women_urls'], function(result) {
-                    if (result.wrestling_women_urls && Array.isArray(result.wrestling_women_urls)) {
-                        let addedCount = 0;
-                        const localExclusions = ['melina', 'melina-perez', 'aj-lee', 'aj', 'becky-lynch', 'becky'];
+                result.wrestling_women_urls.forEach(url => {
+                    const parts = url.split('/').filter(Boolean);
+                    const slug = parts[parts.length - 1].toLowerCase();
+                    
+                    if (localExclusions.includes(slug)) return;
 
-                        result.wrestling_women_urls.forEach(url => {
-                            const parts = url.split('/').filter(Boolean);
-                            const slug = parts[parts.length - 1].toLowerCase();
-                            
-                            if (localExclusions.includes(slug)) return;
+                    const name = slug.replace(/-/g, ' ');
+                    const namePattern = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    
+                    const isDuplicate = blockedRegexWords.some(rx => rx.source && rx.source.includes(namePattern));
 
-                            const name = slug.replace(/-/g, ' ');
-                            const namePattern = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                            
-                            const isDuplicate = blockedRegexWords.some(rx => rx.source && rx.source.includes(namePattern));
-
-                            if (!isDuplicate) {
-                                if (name.length <= 6 || !name.includes(' ')) {
-                                    blockedRegexWords.push(new RegExp('\\b' + namePattern + '\\b', 'i'));
-                                } else {
-                                    blockedRegexWords.push(new RegExp(namePattern, 'i'));
-                                }
-                                addedCount++;
-                            }
-                        });
-                        if (addedCount > 0) {
-                            console.log(`Dynamically added ${addedCount} wrestler names to blocklist.`);
-                            // Re-trigger checks immediately after async load so SPA routes aren't missed
-                            checkAndRedirectUrlBlockedContent();
-                            checkAndRedirectVideoPageBlockedContent();
-                            hideBlockedContent();
-                            deleteContent();
+                    if (!isDuplicate) {
+                        if (name.length <= 6 || !name.includes(' ')) {
+                            blockedRegexWords.push(new RegExp('\\b' + namePattern + '\\b', 'i'));
+                        } else {
+                            blockedRegexWords.push(new RegExp(namePattern, 'i'));
                         }
+                        addedCount++;
                     }
                 });
-            } catch(e) {}
-        }
+                if (addedCount > 0) {
+                    console.log(`Dynamically added ${addedCount} wrestler names to blocklist.`);
+                    checkAndRedirectUrlBlockedContent();
+                    checkAndRedirectVideoPageBlockedContent();
+                    hideBlockedContent();
+                    deleteContent();
+                }
+            }
+        });
     }
     applyDynamicWrestlerBans();
 
-    // --- NEW: Safe Redirect Helper ---
+    // --- Safe Redirect Helper ---
     function safeRedirectToHome() {
         if (isRedirectingNow) return;
         isRedirectingNow = true;
@@ -196,6 +210,9 @@
 
     // Function to check for blocked content and redirect
     function checkAndRedirectVideoPageBlockedContent() {
+        // === GEMINI & MOZILLA SAFEGUARD ===
+        if (window.location.hostname.includes('gemini.google.com') || window.location.hostname.includes('addons.mozilla.org')) return;
+
         try {
             const elements = document.querySelectorAll(videoPageSelectors.join(', '));
             let blockedContentFound = false;
@@ -223,6 +240,10 @@
 
     // Function to check the URL for blocked keywords and redirect if found
     function checkAndRedirectUrlBlockedContent() {
+        // === GEMINI & MOZILLA SAFEGUARD ===
+        // Prevents filtering.js from fighting Gemini's router over the "/app" path and AMO submissions.
+        if (window.location.hostname.includes('gemini.google.com') || window.location.hostname.includes('addons.mozilla.org')) return;
+
         try {
             const urlParams = new URLSearchParams(window.location.search);
             const searchTerm = urlParams.get('k') || '';
@@ -256,6 +277,9 @@
 
     // Function to hide elements containing blocked keywords
     const hideBlockedContent = throttle(() => {
+        // === GEMINI & MOZILLA SAFEGUARD ===
+        if (window.location.hostname.includes('gemini.google.com') || window.location.hostname.includes('addons.mozilla.org')) return;
+
         try {
             const elements = document.querySelectorAll(
                 '.thumb-title a, .title a, .username, .user-profile-name, .thumb-block, .thumb, .thumb-inside, .video-title, ' +
@@ -289,6 +313,9 @@
 
     // Function to delete elements based on selectors
     const deleteContent = throttle(() => {
+        // === GEMINI & MOZILLA SAFEGUARD ===
+        if (window.location.hostname.includes('gemini.google.com') || window.location.hostname.includes('addons.mozilla.org')) return;
+
         try {
             blockSelectors.forEach(selector => {
                 const elements = document.querySelectorAll(selector);
@@ -347,7 +374,7 @@
         originalXhrOpen.apply(this, arguments);
     };
 
-    // --- NEW: Titanium SPA Awareness Hooks ---
+    // --- Titanium SPA Awareness Hooks ---
     function checkSPARouting() {
         if (__lastKnownUrl !== window.location.href) {
             __lastKnownUrl = window.location.href;

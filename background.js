@@ -822,7 +822,7 @@ const manageDynamicRules = async (hostsList) => {
                             addRules: batch
                         }, () => {
                             if (chrome.runtime.lastError) {
-                                console.error(`❌ Batch ${batchNum} failed: ${chrome.runtime.lastError.message}`);
+                                console.error(`❌ Batch ${batchNum} fucking failed, lmao: ${chrome.runtime.lastError.message}`);
                                 batchResolve(false);
                             } else {
                                 console.log(`✅ Batch ${batchNum} success: ${batch.length} rules`);
@@ -938,9 +938,10 @@ const initializeExtension = async () => {
         console.log(`Loaded ${cachedHosts.length} cached hosts for immediate blocking`);
     }
     
-    // Update blocklist
+    // Update blocklist and background data
     await updateBlocklist();
     await updateIncognitoBlockingRules();
+    updateWrestlingRoster();
     
     console.log('Extension initialization completed');
 
@@ -1581,6 +1582,101 @@ resourceTracker.addEventCleanup(() => {
 // Register event listeners
 registerEventListeners();
 
+// ===================================================================================
+// === WRESTLING DYNAMIC BACKGROUND FETCHER ===
+// ===================================================================================
+const WRESTLING_CACHE_TIME_KEY = 'wrestling_women_urls_time';
+const WRESTLING_CACHE_LIFETIME_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+const wrestlingManualBans = [
+    '/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english',
+    '/wrestlers/nikita-naridian', '/wrestlers/riho', '/wrestlers/thekla',
+    '/wrestlers/dani-sekelsky', '/wrestlers/kelly-kelly', '/wrestlers/lita',
+    '/wrestlers/alba-fyre', '/roster/wwe2k26/alundra-blayze'
+];
+
+const wrestlingDoNotBroadcast = [
+    '/wrestlers/melina', '/wrestlers/melina-perez', '/wrestlers/aj-lee',
+    '/wrestlers/aj', '/wrestlers/becky-lynch', '/wrestlers/becky', '/wrestlers/katarina'
+];
+
+async function updateWrestlingRoster() {
+    try {
+        chrome.storage.local.get([WRESTLING_CACHE_TIME_KEY, 'wrestling_women_urls'], async (data) => {
+            const now = Date.now();
+            const lastFetch = data[WRESTLING_CACHE_TIME_KEY] || 0;
+
+            if (data.wrestling_women_urls && data.wrestling_women_urls.length > 0 && (now - lastFetch < WRESTLING_CACHE_LIFETIME_MS)) {
+                console.log('Wrestling roster cache is fresh. Skipping background fetch.');
+                return;
+            }
+
+            console.log('Fetching wrestling rosters in background...');
+            const pagesToFetch = [
+                'https://www.thesmackdownhotel.com/roster/',
+                'https://www.thesmackdownhotel.com/roster/wwe/',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=1',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=2',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=3',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=4',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=5',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=6',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=7',
+                'https://www.thesmackdownhotel.com/wrestlers/?sort=attr.ct176.frontend_value&sortdir=asc&attr.ct8.value=female&page=8',
+                'https://www.thesmackdownhotel.com/roster/?promotion=wwe&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=aew&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=tna&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=njpw&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=aaa&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=roh&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=wcw&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/?promotion=ecw&date=all-time',
+                'https://www.thesmackdownhotel.com/roster/hall-of-fame/'
+            ];
+
+            let combinedUrls = [...wrestlingManualBans];
+            if (data.wrestling_women_urls) {
+                combinedUrls = [...combinedUrls, ...data.wrestling_women_urls];
+            }
+
+            for (const url of pagesToFetch) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) continue;
+                    const html = await response.text();
+
+                    const linkRegex = /href="(\/wrestlers\/[^"]+)"/gi;
+                    let match;
+                    while ((match = linkRegex.exec(html)) !== null) {
+                        combinedUrls.push(match[1]);
+                    }
+                } catch(e) {}
+                await new Promise(resolve => {
+                    const tid = setTimeout(resolve, 400);
+                    resourceTracker.addTimeout(tid);
+                });
+            }
+
+            combinedUrls = [...new Set(combinedUrls)];
+
+            const safeUrls = combinedUrls.filter(url => {
+                const slug = url.toLowerCase();
+                return !wrestlingDoNotBroadcast.some(blocked => slug.includes(blocked));
+            });
+
+            chrome.storage.local.set({
+                'wrestling_women_urls': safeUrls,
+                [WRESTLING_CACHE_TIME_KEY]: now
+            }, () => {
+                console.log(`✅ Background wrestling roster update complete: ${safeUrls.length} names cached.`);
+            });
+        });
+    } catch (e) {
+        console.error('Wrestling background fetch error:', e);
+    }
+}
+// ===================================================================================
+
 // Set up hourly updates with memory optimization and tracking
 const hourlyUpdateId = setInterval(() => {
     console.log('Running scheduled update...');
@@ -1594,6 +1690,7 @@ const hourlyUpdateId = setInterval(() => {
     }
     
     updateBlocklist();
+    updateWrestlingRoster();
     
     // Cleanup interval to prevent memory leaks - more aggressive cleanup
     if (closedTabs.size > 50) {  // Reduced threshold
