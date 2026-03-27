@@ -7,11 +7,11 @@
     const PASSWORD_CONFIG = {
         enabled: true,
         password: '5u89asyadhy2adhg9uh3572y1',
-        sessionKey: 'bravefox_auth', // Scrubbed
-        navigationKey: 'bravefox_navigation', // Scrubbed
+        sessionKey: 'bravefox_auth', 
+        navigationKey: 'bravefox_navigation', 
         maxAttempts: 15,
         lockoutDuration: 300000, 
-        lockoutKey: 'bravefox_lockout', // Scrubbed
+        lockoutKey: 'bravefox_lockout', 
         authTTL: 300000,
         
         targetDomains: [
@@ -41,9 +41,12 @@
             'github.com/NightmaREE3Z*',
             '*github.com/NightmaREE3Z*',
             '*github.com/ungoogled-software*',
-            'gemini.google.com/gem/7b575190249c*',
+            '*gemini.google.com/gem/7b575190249c*',
+            '*gemini.google.com/app/7b575190249c*',
             'gist.github.com/',
             'chrome.google.com/webstore/devconsole*', 
+            '*blocksite.co/options*',
+            '*blocksite.co/*BLOCK_SITES*'
         ],
         
         exactUrls: [],
