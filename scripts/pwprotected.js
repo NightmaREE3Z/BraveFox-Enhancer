@@ -1,5 +1,6 @@
-/* blockExtensionsPage.js
- * Controls the overlay displayed on your internal block-extensions-page.html.
+/* pwprotected.js
+ * Controls the overlay displayed on your internal password-protected.html.
+ * Smart enough to handle both Top-Level Redirections and Iframe injections.
  */
 
 (() => {
@@ -27,26 +28,12 @@
         margin: 0;
         padding: 0;
         background: #ffffff;
+        height: 100%;
       }
       .bf-page {
         min-height: 100vh;
-        display: grid;
-        grid-template-rows: auto 1fr;
-      }
-      .bf-container {
-        display: grid;
-        align-items: center;
-        justify-items: center;
-        padding: 40px 16px;
-      }
-      .bf-card {
-        width: min(720px, 92vw);
-        background: #fff;
-        border-radius: 14px;
-        box-shadow: 0 12px 32px rgba(0,0,0,0.12);
-        padding: 28px;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji';
-        color: #111827;
+        display: flex;
+        flex-direction: column;
       }
       .bf-topbar {
         display: flex;
@@ -54,6 +41,7 @@
         gap: 10px;
         padding: 18px 22px;
         border-bottom: 1px solid #e5e7eb;
+        background: #ffffff;
       }
       .bf-logo {
         width: 28px;
@@ -64,18 +52,30 @@
         font-weight: 800;
         font-size: 18px;
       }
+      .bf-container {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+      .bf-card {
+        width: min(720px, 92vw);
+        background: #fff;
+        border-radius: 14px;
+        box-shadow: 0 12px 32px rgba(0,0,0,0.12);
+        padding: 28px;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        color: #111827;
+      }
       .bf-title {
         font-size: 36px;
         font-weight: 800;
-        margin: 8px 0 4px 0;
-      }
-      .bf-sub {
-        color: #4b5563;
-        margin-bottom: 18px;
+        margin: 8px 0 18px 0;
       }
       .bf-input-row {
         display: grid;
-        grid-template-columns: 1fr auto; /* input + submit button */
+        grid-template-columns: 1fr auto;
         gap: 10px;
         background: #f3f4f6;
         border: 1px solid #e5e7eb;
@@ -178,8 +178,6 @@
     title.className = 'bf-title';
     title.textContent = 'Saatana! Sivu salasanasuojattu';
 
-    // Removed the subtitle element to get rid of the highlighted line under the title.
-
     const form = document.createElement('form');
     form.setAttribute('autocomplete', 'off');
     form.setAttribute('spellcheck', 'false');
@@ -209,11 +207,11 @@
     form.appendChild(error);
 
     card.appendChild(title);
-    // card.appendChild(sub); // Removed
     card.appendChild(form);
 
     container.appendChild(card);
 
+    // Always append topbar now, regardless of iframe status
     page.appendChild(topbar);
     page.appendChild(container);
 
@@ -223,10 +221,16 @@
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (input.value === FIXED_PASSWORD) {
-        // Tell background to bypass redirect for this tab, then navigate to chrome://extensions
-        chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
-          chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
-        });
+        // SMART DETECTION: Are we in an iframe or a top-level tab?
+        if (window !== window.parent) {
+            // We are inside the injected content script iframe. Send signal to parent.
+            window.parent.postMessage('BraveFox-Unlock', '*');
+        } else {
+            // We are a top level tab (redirected from Web Store, extensions page, etc)
+            chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
+                chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
+            });
+        }
       } else {
         error.textContent = 'Incorrect password. Try again.';
         card.animate(

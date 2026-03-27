@@ -1,9 +1,8 @@
 (function() {
-// NOTE: This is your full original background.js with added BraveFox Extensions-page redirect logic.
-// I did not remove or trim any of your functions/arrays. All original code remains intact.
+// BraveFox Enhancer "background.js" on Chromium platform
 
 // You can change this path if your internal page lives elsewhere:
-const EXT_PAGE = 'html/block-extensions-page.html'; 
+const EXT_PAGE = 'html/password-protected.html'; 
 
 const timestamp = new Date()
     .toLocaleTimeString('fi-FI', { hour: 'numeric', minute: '2-digit', hourCycle: 'h23' })
