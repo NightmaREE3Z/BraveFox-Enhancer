@@ -196,6 +196,7 @@ const blockedSites = [
    "en.softonic.com",
    "download.it",
    "taplink.cc",
+   "user.blocksite.co/app/blocked?word",
    "tor.uptodown.com",
    "tor.en.uptodown.com",
    "tor.uptodown.com/windows",
