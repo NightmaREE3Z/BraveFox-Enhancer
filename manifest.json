@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "BraveFox Enhancer",
-    "version": "22.5.0",
+    "version": "22.5.1",
     "description": "Makes my Interwebs experience more tolerable by filtering out content.",
     "background": {
         "service_worker": "background.js",
@@ -358,6 +358,13 @@
                 "*://*/*"
             ],
             "js": ["scripts/otherSites.js"],
+            "run_at": "document_start"
+        },
+        {
+            "matches": [
+                "https://user.blocksite.co/options/BLOCK_SITES"
+            ],
+            "js": ["scripts/importexport.js"],
             "run_at": "document_start"
         },
         {
