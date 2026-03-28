@@ -250,6 +250,25 @@
         }
     }
 
+    // Hijack and modify the BlockSite Error Notification text
+    function modifyErrorNotification() {
+        try {
+            const errorIcons = document.querySelectorAll('[data-automation="notification-img-error"]');
+            errorIcons.forEach(icon => {
+                const container = icon.parentElement;
+                if (container) {
+                    const messageEl = container.querySelector('[data-automation="notification-message"]');
+                    if (messageEl && messageEl.textContent !== 'Oho! Olemme paskoja ja emme toimi.') {
+                        messageEl.textContent = 'Oho! Olemme paskoja, emme toimi.';
+                        console.log('BraveFox: Replaced garbage error notification with the truth.');
+                    }
+                }
+            });
+        } catch (error) {
+            console.warn('BraveFox: Error modifying notification:', error);
+        }
+    }
+
     // Observers and monitoring
     function setupObserver() {
         if (observer) observer.disconnect();
@@ -264,12 +283,25 @@
                                     return node.querySelector && node.querySelector(selector);
                                 } catch (e) { return false; }
                             });
-                            if (hasUnwantedElements) shouldProcess = true;
+                            
+                            // Also trigger processing if the error notification pops up
+                            let hasErrorNotification = false;
+                            try {
+                                hasErrorNotification = (node.querySelector && node.querySelector('[data-automation="notification-message"]')) || 
+                                                       (node.matches && node.matches('[data-automation="notification-message"]'));
+                            } catch (e) {}
+
+                            if (hasUnwantedElements || hasErrorNotification) shouldProcess = true;
                         }
                     });
                 }
             });
-            if (shouldProcess) setTimeout(removeUnwantedElements, 10);
+            if (shouldProcess) {
+                setTimeout(() => {
+                    removeUnwantedElements();
+                    modifyErrorNotification();
+                }, 10);
+            }
         });
         const observeTarget = document.body || document.documentElement;
         if (observeTarget) observer.observe(observeTarget, CONFIG.observerConfig);
@@ -280,6 +312,7 @@
             if (!injectedStyleSheet || !injectedStyleSheet.parentNode) injectHidingCSS();
             removeUnwantedElements();
             hideNextDNSForgotPasswordLinks();
+            modifyErrorNotification();
             if (!observer) setupObserver();
         }, CONFIG.continuousMonitoringInterval);
     }
@@ -300,11 +333,13 @@
         injectHidingCSS();
         removeUnwantedElements();
         hideNextDNSForgotPasswordLinks();
+        modifyErrorNotification();
         setupObserver();
         const fastRetryInterval = setInterval(() => {
             retryCount++;
             const count = removeUnwantedElements();
             hideNextDNSForgotPasswordLinks();
+            modifyErrorNotification();
             if (retryCount >= CONFIG.retryInterval) clearInterval(fastRetryInterval);
         }, CONFIG.retryInterval);
     }
@@ -315,6 +350,7 @@
         injectHidingCSS();
         const initialCount = removeUnwantedElements();
         hideNextDNSForgotPasswordLinks();
+        modifyErrorNotification();
         console.log(`BraveFox: Initially processed ${initialCount} delete account elements universally`);
         setupObserver();
         setupContinuousMonitoring();
@@ -323,6 +359,7 @@
             retryCount++;
             const count = removeUnwantedElements();
             hideNextDNSForgotPasswordLinks();
+            modifyErrorNotification();
             if (count > 0) console.log(`BraveFox: Processed ${count} delete account elements universally (retry ${retryCount})`);
             if (retryCount >= CONFIG.maxRetries) {
                 clearInterval(initialRetryInterval);
@@ -346,6 +383,7 @@
         try { 
             removeUnwantedElements(); 
             hideNextDNSForgotPasswordLinks();
+            modifyErrorNotification();
         } catch (e) {}
     }, 50);
     setTimeout(() => { clearInterval(earlyInterval); }, 5000);
