@@ -5,6 +5,12 @@
 
     console.log('BraveFox: Word Import/Export Assembly Line initialized.');
 
+    // Global variable to track the currently selected batch size (Defaulted to 7 per your request)
+    let currentBatchSize = 7;
+    
+    // Global flag to temporarily disable our trashcan interceptor when running automated batch deletes
+    let skipIntercept = false;
+
     // --- HELPER UTILITIES ---
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -93,6 +99,107 @@
         });
     }
 
+    // --- BRAVEFOX CUSTOM UI MODAL ---
+    function showBraveFoxConfirm(messageHtml, onYesCallback) {
+        const overlay = document.createElement('div');
+        // Z-Index pushed to absolute maximum to ensure it appears above BlockSite's React App
+        overlay.style.cssText = `
+            position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2147483647; 
+            display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        `;
+
+        const box = document.createElement('div');
+        box.style.cssText = `
+            background: #fff; padding: 24px 32px; border-radius: 12px; width: 400px; 
+            max-width: 90%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center;
+        `;
+
+        const text = document.createElement('div');
+        text.style.cssText = `font-size: 16px; color: #333; margin-bottom: 24px; line-height: 1.5;`;
+        text.innerHTML = messageHtml.replace(/\*\*(.*?)\*\*/g, '<b style="color: #dc2626; font-size: 18px;">$1</b>');
+
+        const btnContainer = document.createElement('div');
+        btnContainer.style.cssText = `display: flex; justify-content: center; gap: 16px;`;
+
+        const btnStyle = `padding: 10px 24px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; border: none; transition: opacity 0.2s;`;
+
+        const btnCancel = document.createElement('button');
+        btnCancel.textContent = 'Cancel';
+        btnCancel.style.cssText = btnStyle + `background: #e5e7eb; color: #374151;`;
+        btnCancel.onmouseover = () => btnCancel.style.opacity = '0.8';
+        btnCancel.onmouseout = () => btnCancel.style.opacity = '1';
+
+        const btnYes = document.createElement('button');
+        btnYes.textContent = 'Yes, Delete';
+        btnYes.style.cssText = btnStyle + `background: #dc2626; color: #ffffff;`;
+        btnYes.onmouseover = () => btnYes.style.opacity = '0.8';
+        btnYes.onmouseout = () => btnYes.style.opacity = '1';
+
+        btnCancel.onclick = () => document.body.removeChild(overlay);
+        btnYes.onclick = () => {
+            document.body.removeChild(overlay);
+            if (onYesCallback) onYesCallback();
+        };
+
+        btnContainer.appendChild(btnCancel);
+        btnContainer.appendChild(btnYes);
+        box.appendChild(text);
+        box.appendChild(btnContainer);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    }
+
+    // --- DOM SCRAPERS FOR INTERCEPTOR ---
+    function getTermFromTrashBtn(btn) {
+        let current = btn.parentElement;
+        let attempts = 0;
+        while (current && attempts < 6) {
+            const termEl = current.querySelector('[data-automation="item"]');
+            if (termEl) return termEl.textContent.trim();
+            current = current.parentElement;
+            attempts++;
+        }
+        return "this item";
+    }
+
+    function isWordItem(btn) {
+        let current = btn.parentElement;
+        let attempts = 0;
+        while (current && attempts < 6) {
+            const descEl = current.querySelector('[data-automation="item-description"]');
+            if (descEl && descEl.textContent.trim().toLowerCase() === 'avainsana') return true;
+            current = current.parentElement;
+            attempts++;
+        }
+        return false;
+    }
+
+    // --- GLOBAL TRASHCAN INTERCEPTOR ---
+    document.addEventListener('click', (e) => {
+        if (skipIntercept) return; 
+
+        const trashBtn = e.target.closest('[data-automation="item-icon"]');
+        if (trashBtn) {
+            // Hijack the click immediately
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+
+            const termName = getTermFromTrashBtn(trashBtn);
+
+            showBraveFoxConfirm(`Are you sure you want to delete **${termName}**?`, () => {
+                // Drop shields and manually force the click so React accepts it
+                skipIntercept = true;
+                
+                trashBtn.click();
+                
+                // Keep shields down just long enough for React's event loop
+                setTimeout(() => { skipIntercept = false; }, 100);
+            });
+        }
+    }, true); 
+
     // --- THE EXPORT HEIST ---
     function exportWords() {
         console.log('BraveFox: Initiating Word Export...');
@@ -105,8 +212,10 @@
 
         let wordsList = [];
         wordElements.forEach(el => {
-            if (el.textContent && el.textContent.trim() !== '') {
-                wordsList.push(el.textContent.trim());
+            if (isWordItem(el)) {
+                if (el.textContent && el.textContent.trim() !== '') {
+                    wordsList.push(el.textContent.trim());
+                }
             }
         });
 
@@ -126,8 +235,53 @@
         console.log(`BraveFox: Successfully exported ${wordsList.length} terms.`);
     }
 
+    // --- BATCH REMOVAL UTILITY (REWRITTEN FOR REACT STABILITY) ---
+    function batchRemoveWords() {
+        // Initial check to see how many words exist
+        let initialTrashCans = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
+
+        if (initialTrashCans.length === 0) {
+            alert('BraveFox: No words found on screen to remove!');
+            return;
+        }
+
+        showBraveFoxConfirm(`Are you sure you want to batch remove all **${initialTrashCans.length}** words?`, async () => {
+            console.log(`BraveFox: Commencing tactical nuke of ${initialTrashCans.length} words...`);
+            
+            skipIntercept = true; // Drop interceptor shields 
+            
+            // Re-query dynamically to avoid "Ghost Nodes"
+            let remaining = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
+            
+            while (remaining.length > 0) {
+                let btn = remaining[0];
+                let termName = getTermFromTrashBtn(btn);
+                console.log(`BraveFox: Nuking -> ${termName}`);
+
+                // Click the button
+                btn.click();
+                
+                // Wait for React to physically detach the button from the page before continuing
+                let waitLoops = 0;
+                while (document.contains(btn) && waitLoops < 20) {
+                    await sleep(50);
+                    waitLoops++;
+                }
+
+                // Wait your requested 500ms delay to keep the Extension/React from crashing
+                await sleep(500); 
+
+                // Re-scan the DOM for the next live target
+                remaining = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
+            }
+            
+            skipIntercept = false; // Shields up
+            console.log('BraveFox: Batch removal sequence complete.');
+        });
+    }
+
     // --- THE BATCH PROCESSOR (ASSEMBLY LINE) ---
-    async function processInBatches(words, batchSize = 70) {
+    async function processInBatches(words, batchSize = 10) {
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         let currentIndex = 0;
 
@@ -175,7 +329,6 @@
 
                     console.log(`BraveFox: Injected -> ${word}`);
 
-                    // Required 1500ms cooldown
                     await sleep(1500); 
                 }
 
@@ -220,23 +373,21 @@
             return;
         }
 
-        console.log(`BraveFox: Preparing to batch import ${words.length} terms...`);
-        processInBatches(words, 70);
+        console.log(`BraveFox: Preparing to batch import ${words.length} terms using a batch size of ${currentBatchSize}...`);
+        processInBatches(words, currentBatchSize);
     }
 
     // --- THE COMMAND CENTER INJECTOR ---
     function injectControlCenter() {
-        // Find the native "Lisää estoluetteloon" button
         const addBtn = document.querySelector('[data-automation="add-items-button"]');
         if (!addBtn) return;
 
-        // Check if our control center is physically on the screen (fixes the SPA refresh bug)
         const existingGroup = document.getElementById('bravefox-control-center');
         if (existingGroup && document.body.contains(existingGroup)) return;
 
         console.log('BraveFox: Building Central UI Command Center...');
 
-        // 1. Hide the native bottom buttons globally so they never show up
+        // 1. Hide the native bottom buttons and FIX pointer events on trashcans
         if (!document.getElementById('bravefox-styles')) {
             const style = document.createElement('style');
             style.id = 'bravefox-styles';
@@ -245,19 +396,34 @@
                 [data-automation="import-button"] {
                     display: none !important;
                 }
+                /* FORCE-FIELD FIX: Ensures clicks hit the wrapper, not the inner image */
+                [data-automation="item-icon"] * {
+                    pointer-events: none !important;
+                }
             `;
             document.head.appendChild(style);
         }
 
-        // 2. Build our container
         const btnGroup = document.createElement('div');
         btnGroup.id = 'bravefox-control-center';
         btnGroup.style.cssText = 'display: flex; gap: 12px; margin-left: 20px; align-items: center;';
 
-        // Base button style
         const btnStyle = 'padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; border: 2px solid; display: flex; align-items: center; justify-content: center; background: transparent; transition: opacity 0.2s;';
 
-        // Button A: Import Links (Native Proxy)
+        // Menu E: Dynamic Batch Size Selector
+        const batchSelect = document.createElement('select');
+        batchSelect.style.cssText = btnStyle + 'background: transparent; color: #333; cursor: pointer; border-color: #ccc; appearance: auto; padding-right: 10px; margin-right: 4px;';
+        batchSelect.innerHTML = `
+            <option value="7">Small (7)</option>
+            <option value="10">Medium (10) </option>
+            <option value="15">Large (15)</option>
+        `;
+        batchSelect.value = currentBatchSize.toString(); 
+        batchSelect.onchange = (e) => {
+            currentBatchSize = parseInt(e.target.value, 10); // Fixed Math Base!
+            console.log(`BraveFox: Batch size dynamically set to ${currentBatchSize}`);
+        };
+
         const impLinks = document.createElement('div');
         impLinks.style.cssText = btnStyle + 'color: #616161; border-color: #616161; position: relative;';
         impLinks.innerHTML = `<div>Import Links</div>`;
@@ -267,7 +433,6 @@
             else alert('BraveFox: Native Link Import input not found in DOM!');
         };
 
-        // Button B: Export Links (Native Proxy)
         const expLinks = document.createElement('div');
         expLinks.style.cssText = btnStyle + 'color: #616161; border-color: #616161;';
         expLinks.textContent = 'Export Links';
@@ -277,7 +442,6 @@
             else alert('BraveFox: Native Link Export button not found in DOM!');
         };
 
-        // Button C: Import Terms (Custom Automation)
         const impTerms = document.createElement('div');
         impTerms.style.cssText = btnStyle + 'color: #16a34a; border-color: #16a34a; position: relative;';
         impTerms.innerHTML = `
@@ -295,19 +459,23 @@
             }
         });
 
-        // Button D: Export Terms (Custom Scraper)
         const expTerms = document.createElement('div');
         expTerms.style.cssText = btnStyle + 'color: #2563eb; border-color: #2563eb;';
         expTerms.textContent = 'Export Terms';
         expTerms.onclick = exportWords;
 
-        // Assemble the group
+        const batchRemove = document.createElement('div');
+        batchRemove.style.cssText = btnStyle + 'color: #dc2626; border-color: #dc2626; margin-left: 12px;';
+        batchRemove.textContent = 'Batch Remove';
+        batchRemove.onclick = batchRemoveWords;
+
+        btnGroup.appendChild(batchSelect);
         btnGroup.appendChild(impLinks);
         btnGroup.appendChild(expLinks);
         btnGroup.appendChild(impTerms);
         btnGroup.appendChild(expTerms);
+        btnGroup.appendChild(batchRemove);
 
-        // 3. Inject it directly next to the "Lisää estoluetteloon" wrapper
         const addItemsWrapper = addBtn.closest('.add-items-btn-wrapper');
         if (addItemsWrapper && addItemsWrapper.parentElement) {
             const parentFlex = addItemsWrapper.parentElement;
@@ -317,7 +485,6 @@
         }
     }
 
-    // Observer constantly checks if the DOM needs our Command Center rebuilt
     const domObserver = new MutationObserver(() => {
         injectControlCenter();
     });
@@ -327,7 +494,6 @@
         subtree: true
     });
 
-    // HEARTBEAT FIX: Pulse every 500ms to ensure the UI is restored immediately after a refresh
     setInterval(injectControlCenter, 500);
 
 })();
