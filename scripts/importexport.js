@@ -14,14 +14,13 @@
     // --- HELPER UTILITIES ---
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-    // Ucey Coder React Bypass: Forces the Virtual DOM to recognize input changes (BULLETPROOFED)
+    // Ucey Coder React Bypass: Forces the Virtual DOM to recognize input changes
     function setNativeValue(element, value) {
         if (!element) return;
         try {
             let prototype = Object.getPrototypeOf(element);
             let prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
             
-            // Walk up the prototype chain if we don't find it immediately
             while (!prototypeValueSetter && prototype !== null) {
                 prototype = Object.getPrototypeOf(prototype);
                 if (prototype) {
@@ -44,7 +43,6 @@
         }
     }
 
-    // Smart Waiter: Waits for an element to appear in the DOM
     async function waitForElement(selector, timeout = 15000) {
         return new Promise((resolve, reject) => {
             if (document.querySelector(selector)) {
@@ -58,7 +56,6 @@
                 }
             });
 
-            // Ucey Fix: Using documentElement to prevent 'Node' errors before body loads
             observer.observe(document.documentElement, { childList: true, subtree: true });
 
             setTimeout(() => {
@@ -68,7 +65,6 @@
         });
     }
 
-    // Smart Waiter: Waits for an element to be completely removed from the DOM
     async function waitForElementToDisappear(selector, timeout = 30000) {
         return new Promise((resolve, reject) => {
             if (!document.querySelector(selector)) {
@@ -82,7 +78,6 @@
                 }
             });
 
-            // Ucey Fix: Using documentElement
             observer.observe(document.documentElement, { childList: true, subtree: true });
 
             setTimeout(() => {
@@ -92,7 +87,6 @@
         });
     }
 
-    // Smart Waiter: Hyper-specific observer to snipe the React dropdown item
     async function waitForDropdownItem(word, timeout = 3000) {
         return new Promise((resolve) => {
             const exactSelector = `[data-automation="item-${word}"]`;
@@ -122,7 +116,6 @@
                 }
             });
 
-            // Ucey Fix: Using documentElement
             observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
             setTimeout(() => {
@@ -365,32 +358,26 @@
                 for (let i = 0; i < currentBatch.length; i++) {
                     const word = currentBatch[i];
                     
-                    // Re-query input dynamically to prevent clicking an undefined React ghost node
                     let activeInput = document.querySelector('[data-automation="add-items-search-input"]');
                     if (!activeInput) {
                         activeInput = await waitForElement('[data-automation="add-items-search-input"]', 3000);
                     }
 
-                    // Ucey Fix: Replaced standard setter with native React Bypass
                     setNativeValue(activeInput, word);
 
                     let listItem = await waitForDropdownItem(word, 2000);
 
-                    // Safely click the dropdown if it appears
                     if (listItem && typeof listItem.click === 'function') {
                         listItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
                         listItem.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                         try { listItem.click(); } catch(e) {}
                     }
 
-                    // Always send native Enter events as fallback
                     if (activeInput) {
                         try {
                             activeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
                             await sleep(50);
                             activeInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                            
-                            // UCEY FIX: Force React to commit the input state! 
                             activeInput.dispatchEvent(new Event('blur', { bubbles: true }));
                         } catch(e) {}
                     }
@@ -399,24 +386,46 @@
                     await sleep(1500); 
                 }
 
-                // Step 5: Save the batch safely
-                // UCEY FIX: Give BlockSite's Redux state a moment to serialize the payload before we click save!
+                // Step 5: Save the batch safely (UPGRADED)
                 console.log('BraveFox: Batch injected. Waiting for React to serialize...');
                 await sleep(1000);
 
                 const doneBtn = document.querySelector('[data-automation="add-items-done-btn"]');
-                if (doneBtn && typeof doneBtn.click === 'function') {
-                    doneBtn.click();
+                if (doneBtn) {
+                    console.log('BraveFox: Smashing the Tehty button...');
+                    // Full synthetic human interaction to bypass React's event trap
+                    doneBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    doneBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    try { doneBtn.click(); } catch(e) {}
                 } else {
-                    console.error('BraveFox: Could not find TEHTY button! Firing Escape key backup.');
-                    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                    console.warn('BraveFox: Could not find TEHTY button!');
                 }
 
-                // Step 6: Smart transition
+                // Step 6: Smart transition (UPGRADED)
                 console.log('BraveFox: Waiting for modal to close...');
-                await waitForElementToDisappear('[data-automation="add-items-search-input"]');
                 
-                // UCEY FIX: Give their Background Script/API time to sync the payload to their cloud!
+                // Wait up to 3 seconds naturally
+                let closed = false;
+                for (let w = 0; w < 6; w++) {
+                    if (!document.querySelector('[data-automation="add-items-search-input"]')) {
+                        closed = true;
+                        break;
+                    }
+                    await sleep(500);
+                }
+
+                // If React is being stubborn and left it open, forcefully smash the Escape key
+                if (!closed) {
+                    console.warn('BraveFox: Modal hung up! Smashing Escape key backup...');
+                    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+                    await sleep(1000); // Wait for the animation to die
+                }
+
+                // Final check before moving on to prevent the timeout crash
+                if (document.querySelector('[data-automation="add-items-search-input"]')) {
+                    throw new Error("BraveFox: Modal absolutely refused to close. UI might be completely frozen.");
+                }
+                
                 console.log('BraveFox: Waiting for BlockSite background sync API...');
                 await sleep(2500); 
 
