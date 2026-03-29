@@ -5,10 +5,10 @@
 
     console.log('BraveFox: Word Import/Export Assembly Line initialized.');
 
-    // Global variable to track the currently selected batch size (Defaulted to 7 per your request)
-    let currentBatchSize = 7;
+    // Global variable to track the currently selected batch size.
+    let currentBatchSize = 4;
     
-    // Global flag to temporarily disable our trashcan interceptor when running automated batch deletes
+    // Global flag to temporarily disable trashcan interceptor when running automated batch deletes
     let skipIntercept = false;
 
     // --- HELPER UTILITIES ---
@@ -281,7 +281,7 @@
     }
 
     // --- THE BATCH PROCESSOR (ASSEMBLY LINE) ---
-    async function processInBatches(words, batchSize = 10) {
+    async function processInBatches(words, batchSize = 4) {
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         let currentIndex = 0;
 
@@ -414,9 +414,9 @@
         const batchSelect = document.createElement('select');
         batchSelect.style.cssText = btnStyle + 'background: transparent; color: #333; cursor: pointer; border-color: #ccc; appearance: auto; padding-right: 10px; margin-right: 4px;';
         batchSelect.innerHTML = `
-            <option value="7">Small (7)</option>
-            <option value="10">Medium (10) </option>
-            <option value="15">Large (15)</option>
+            <option value="4">Small (4)</option>
+            <option value="7">Medium (7)</option>
+            <option value="10">Large (10) </option>
         `;
         batchSelect.value = currentBatchSize.toString(); 
         batchSelect.onchange = (e) => {
