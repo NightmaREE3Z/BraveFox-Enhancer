@@ -14,6 +14,36 @@
     // --- HELPER UTILITIES ---
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+    // Ucey Coder React Bypass: Forces the Virtual DOM to recognize input changes (BULLETPROOFED)
+    function setNativeValue(element, value) {
+        if (!element) return;
+        try {
+            let prototype = Object.getPrototypeOf(element);
+            let prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+            
+            // Walk up the prototype chain if we don't find it immediately
+            while (!prototypeValueSetter && prototype !== null) {
+                prototype = Object.getPrototypeOf(prototype);
+                if (prototype) {
+                    prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+                }
+            }
+
+            if (prototypeValueSetter) {
+                prototypeValueSetter.call(element, value);
+            } else {
+                element.value = value;
+            }
+            
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (error) {
+            console.warn("BraveFox: Native setter failed, trying fallback.", error);
+            element.value = value;
+            element.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }
+
     // Smart Waiter: Waits for an element to appear in the DOM
     async function waitForElement(selector, timeout = 15000) {
         return new Promise((resolve, reject) => {
@@ -28,7 +58,8 @@
                 }
             });
 
-            observer.observe(document.body, { childList: true, subtree: true });
+            // Ucey Fix: Using documentElement to prevent 'Node' errors before body loads
+            observer.observe(document.documentElement, { childList: true, subtree: true });
 
             setTimeout(() => {
                 observer.disconnect();
@@ -51,7 +82,8 @@
                 }
             });
 
-            observer.observe(document.body, { childList: true, subtree: true });
+            // Ucey Fix: Using documentElement
+            observer.observe(document.documentElement, { childList: true, subtree: true });
 
             setTimeout(() => {
                 observer.disconnect();
@@ -90,7 +122,8 @@
                 }
             });
 
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+            // Ucey Fix: Using documentElement
+            observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
             setTimeout(() => {
                 observer.disconnect();
@@ -102,7 +135,6 @@
     // --- BRAVEFOX CUSTOM UI MODAL ---
     function showBraveFoxConfirm(messageHtml, onYesCallback) {
         const overlay = document.createElement('div');
-        // Z-Index pushed to absolute maximum to ensure it appears above BlockSite's React App
         overlay.style.cssText = `
             position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 2147483647; 
             display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px);
@@ -163,15 +195,34 @@
         return "this item";
     }
 
-    function isWordItem(btn) {
-        let current = btn.parentElement;
+    function isWordItem(element) {
+        let current = element.parentElement;
         let attempts = 0;
+        
         while (current && attempts < 6) {
             const descEl = current.querySelector('[data-automation="item-description"]');
-            if (descEl && descEl.textContent.trim().toLowerCase() === 'avainsana') return true;
+            if (descEl) {
+                const desc = descEl.textContent.trim().toLowerCase();
+                if (desc.includes('avainsana') || desc.includes('keyword') || desc.includes('word')) return true;
+                if (desc.includes('verkkosivusto') || desc.includes('website') || desc.includes('link')) return false;
+            }
             current = current.parentElement;
             attempts++;
         }
+        
+        current = element.parentElement;
+        attempts = 0;
+        while (current && attempts < 6) {
+            const textEl = current.querySelector('[data-automation="item"]');
+            if (textEl) {
+                const text = textEl.textContent.trim();
+                const isUrl = /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/.*)?$/.test(text);
+                return !isUrl;
+            }
+            current = current.parentElement;
+            attempts++;
+        }
+        
         return false;
     }
 
@@ -181,7 +232,6 @@
 
         const trashBtn = e.target.closest('[data-automation="item-icon"]');
         if (trashBtn) {
-            // Hijack the click immediately
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
@@ -189,24 +239,24 @@
             const termName = getTermFromTrashBtn(trashBtn);
 
             showBraveFoxConfirm(`Are you sure you want to delete **${termName}**?`, () => {
-                // Drop shields and manually force the click so React accepts it
                 skipIntercept = true;
                 
-                trashBtn.click();
+                if (trashBtn && typeof trashBtn.click === 'function') {
+                    trashBtn.click();
+                }
                 
-                // Keep shields down just long enough for React's event loop
                 setTimeout(() => { skipIntercept = false; }, 100);
             });
         }
     }, true); 
 
-    // --- THE EXPORT HEIST ---
+    // --- THE EXPORT HEIST (STRICT TERMS ONLY) ---
     function exportWords() {
-        console.log('BraveFox: Initiating Word Export...');
+        console.log('BraveFox: Initiating Strictly-Terms Word Export...');
         const wordElements = document.querySelectorAll('[data-automation="item"]');
         
         if (wordElements.length === 0) {
-            alert('BraveFox: No blocked terms found on screen to export!');
+            alert('BraveFox: No items found on screen to export!');
             return;
         }
 
@@ -219,25 +269,30 @@
             }
         });
 
+        if (wordsList.length === 0) {
+            alert('BraveFox: No pure "Terms" or "Keywords" found in the list! (URLs are successfully ignored)');
+            return;
+        }
+
         const blob = new Blob([wordsList.join('\n')], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         a.download = 'BraveFox-Blocksite-Terms.csv';
         document.body.appendChild(a);
-        a.click();
+        
+        if (typeof a.click === 'function') a.click();
         
         setTimeout(() => {
             document.body.removeChild(a);
             window.URL.revokeObjectURL(url);
         }, 0);
         
-        console.log(`BraveFox: Successfully exported ${wordsList.length} terms.`);
+        console.log(`BraveFox: Successfully exported ${wordsList.length} pure terms.`);
     }
 
-    // --- BATCH REMOVAL UTILITY (REWRITTEN FOR REACT STABILITY) ---
+    // --- BATCH REMOVAL UTILITY ---
     function batchRemoveWords() {
-        // Initial check to see how many words exist
         let initialTrashCans = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
 
         if (initialTrashCans.length === 0) {
@@ -248,9 +303,7 @@
         showBraveFoxConfirm(`Are you sure you want to batch remove all **${initialTrashCans.length}** words?`, async () => {
             console.log(`BraveFox: Commencing tactical nuke of ${initialTrashCans.length} words...`);
             
-            skipIntercept = true; // Drop interceptor shields 
-            
-            // Re-query dynamically to avoid "Ghost Nodes"
+            skipIntercept = true; 
             let remaining = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
             
             while (remaining.length > 0) {
@@ -258,31 +311,25 @@
                 let termName = getTermFromTrashBtn(btn);
                 console.log(`BraveFox: Nuking -> ${termName}`);
 
-                // Click the button
-                btn.click();
+                if (btn && typeof btn.click === 'function') btn.click();
                 
-                // Wait for React to physically detach the button from the page before continuing
                 let waitLoops = 0;
                 while (document.contains(btn) && waitLoops < 20) {
                     await sleep(50);
                     waitLoops++;
                 }
 
-                // Wait your requested 500ms delay to keep the Extension/React from crashing
                 await sleep(500); 
-
-                // Re-scan the DOM for the next live target
                 remaining = Array.from(document.querySelectorAll('[data-automation="item-icon"]')).filter(isWordItem);
             }
             
-            skipIntercept = false; // Shields up
+            skipIntercept = false; 
             console.log('BraveFox: Batch removal sequence complete.');
         });
     }
 
     // --- THE BATCH PROCESSOR (ASSEMBLY LINE) ---
     async function processInBatches(words, batchSize = 4) {
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
         let currentIndex = 0;
 
         while (currentIndex < words.length) {
@@ -290,20 +337,26 @@
             console.log(`\nBraveFox: Starting batch ${currentIndex + 1} to ${currentIndex + currentBatch.length} of ${words.length}...`);
 
             try {
-                // Step 1: Open the modal
+                // Step 1: Open the modal safely
                 const addItemsBtn = await waitForElement('[data-automation="add-items-button"]');
                 console.log('BraveFox: Opening modal...');
-                addItemsBtn.click();
+                if (addItemsBtn && typeof addItemsBtn.click === 'function') {
+                    addItemsBtn.click();
+                }
 
                 // Step 2: Wait for search input
-                const targetInput = await waitForElement('[data-automation="add-items-search-input"]');
+                let targetInput = await waitForElement('[data-automation="add-items-search-input"]');
 
                 // Step 3: Find and click the "Avainsanat" (Keywords) tab instantly
                 const tabs = document.querySelectorAll('button[data-automation="tab"]');
                 for (let tab of tabs) {
-                    if (tab.textContent.trim().toLowerCase().includes('avainsanat') || tab.textContent.trim().toLowerCase().includes('keyword')) {
-                        tab.click();
+                    const txt = tab.textContent.trim().toLowerCase();
+                    if (txt.includes('avainsana') || txt.includes('keyword')) {
+                        if (typeof tab.click === 'function') tab.click();
                         console.log('BraveFox: Switched to Keywords tab.');
+                        
+                        // Give React time to destroy the website input and mount the keyword input
+                        await sleep(600); 
                         break;
                     }
                 }
@@ -312,40 +365,61 @@
                 for (let i = 0; i < currentBatch.length; i++) {
                     const word = currentBatch[i];
                     
-                    nativeInputValueSetter.call(targetInput, word);
-                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
-                    targetInput.dispatchEvent(new Event('change', { bubbles: true }));
-
-                    let listItem = await waitForDropdownItem(word);
-
-                    if (listItem) {
-                        listItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                        listItem.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                        listItem.click();
+                    // Re-query input dynamically to prevent clicking an undefined React ghost node
+                    let activeInput = document.querySelector('[data-automation="add-items-search-input"]');
+                    if (!activeInput) {
+                        activeInput = await waitForElement('[data-automation="add-items-search-input"]', 3000);
                     }
 
-                    targetInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                    targetInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                    // Ucey Fix: Replaced standard setter with native React Bypass
+                    setNativeValue(activeInput, word);
+
+                    let listItem = await waitForDropdownItem(word, 2000);
+
+                    // Safely click the dropdown if it appears
+                    if (listItem && typeof listItem.click === 'function') {
+                        listItem.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                        listItem.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                        try { listItem.click(); } catch(e) {}
+                    }
+
+                    // Always send native Enter events as fallback
+                    if (activeInput) {
+                        try {
+                            activeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                            await sleep(50);
+                            activeInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                            
+                            // UCEY FIX: Force React to commit the input state! 
+                            activeInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                        } catch(e) {}
+                    }
 
                     console.log(`BraveFox: Injected -> ${word}`);
-
                     await sleep(1500); 
                 }
 
-                // Step 5: Save the batch
-                console.log('BraveFox: Batch injected. Saving...');
+                // Step 5: Save the batch safely
+                // UCEY FIX: Give BlockSite's Redux state a moment to serialize the payload before we click save!
+                console.log('BraveFox: Batch injected. Waiting for React to serialize...');
+                await sleep(1000);
+
                 const doneBtn = document.querySelector('[data-automation="add-items-done-btn"]');
-                if (doneBtn) {
+                if (doneBtn && typeof doneBtn.click === 'function') {
                     doneBtn.click();
                 } else {
-                    console.error('BraveFox: Could not find TEHTY button!');
-                    alert('BraveFox: Fatal Error. Could not find the save button. Stopping script.');
-                    return;
+                    console.error('BraveFox: Could not find TEHTY button! Firing Escape key backup.');
+                    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
                 }
 
                 // Step 6: Smart transition
                 console.log('BraveFox: Waiting for modal to close...');
                 await waitForElementToDisappear('[data-automation="add-items-search-input"]');
+                
+                // UCEY FIX: Give their Background Script/API time to sync the payload to their cloud!
+                console.log('BraveFox: Waiting for BlockSite background sync API...');
+                await sleep(2500); 
+
                 await waitForElement('[data-automation="add-items-button"]');
                 
                 currentIndex += batchSize;
@@ -387,7 +461,6 @@
 
         console.log('BraveFox: Building Central UI Command Center...');
 
-        // 1. Hide the native bottom buttons and FIX pointer events on trashcans
         if (!document.getElementById('bravefox-styles')) {
             const style = document.createElement('style');
             style.id = 'bravefox-styles';
@@ -396,7 +469,6 @@
                 [data-automation="import-button"] {
                     display: none !important;
                 }
-                /* FORCE-FIELD FIX: Ensures clicks hit the wrapper, not the inner image */
                 [data-automation="item-icon"] * {
                     pointer-events: none !important;
                 }
@@ -410,7 +482,6 @@
 
         const btnStyle = 'padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; border: 2px solid; display: flex; align-items: center; justify-content: center; background: transparent; transition: opacity 0.2s;';
 
-        // Menu E: Dynamic Batch Size Selector
         const batchSelect = document.createElement('select');
         batchSelect.style.cssText = btnStyle + 'background: transparent; color: #333; cursor: pointer; border-color: #ccc; appearance: auto; padding-right: 10px; margin-right: 4px;';
         batchSelect.innerHTML = `
@@ -420,7 +491,7 @@
         `;
         batchSelect.value = currentBatchSize.toString(); 
         batchSelect.onchange = (e) => {
-            currentBatchSize = parseInt(e.target.value, 10); // Fixed Math Base!
+            currentBatchSize = parseInt(e.target.value, 10);
             console.log(`BraveFox: Batch size dynamically set to ${currentBatchSize}`);
         };
 
@@ -429,7 +500,7 @@
         impLinks.innerHTML = `<div>Import Links</div>`;
         impLinks.onclick = () => {
             const nativeImp = document.querySelector('[data-automation="import-file-input"]');
-            if (nativeImp) nativeImp.click();
+            if (nativeImp && typeof nativeImp.click === 'function') nativeImp.click();
             else alert('BraveFox: Native Link Import input not found in DOM!');
         };
 
@@ -438,7 +509,7 @@
         expLinks.textContent = 'Export Links';
         expLinks.onclick = () => {
             const nativeExp = document.querySelector('[data-automation="export-button"]');
-            if (nativeExp) nativeExp.click();
+            if (nativeExp && typeof nativeExp.click === 'function') nativeExp.click();
             else alert('BraveFox: Native Link Export button not found in DOM!');
         };
 
