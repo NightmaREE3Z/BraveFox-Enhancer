@@ -363,6 +363,15 @@ const blockedSites = [
    "instagram.com/katarii"
 ];
 
+// Blocked TLDs for auto-closure
+const blockedTLDs = [
+    '.ai', '.art', '.io', '.makeup', '.off', '.club', '.id', '.it', '.best', '.cc', '.cn', '.click',
+    '.you', '.to', '.top', '.me', '.us', '.ru', '.vip', '.online', '.hot', '.her', '.sex', '.xxx', '.nsfw',
+    '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.asia',
+    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.one', '.ee', '.in', '.gf', '.fox', '.fun', '.exposed',
+    '.fyi', '.fr', '.life', '.now', '.today', '.world', '.xyz', '.zone', '.nude'
+];
+
 // Memory-optimized cache with size limit and TTL
 class MemoryManagedCache {
     constructor(maxSize = 1000, ttlMs = 300000) {
@@ -1074,8 +1083,16 @@ const isBlockedUrl = (url) => {
 
     // Check against hosts list from fetched files
     const hostname = getHostnameFromUrl(url);
-    if (hostname && hostsListForClosure.has(hostname)) {
-        return true;
+    if (hostname) {
+        if (hostsListForClosure.has(hostname)) {
+            return true;
+        }
+        
+        // TLD Checking implementation
+        const lowerHostname = hostname.toLowerCase();
+        if (blockedTLDs.some(tld => lowerHostname.endsWith(tld))) {
+            return true;
+        }
     }
 
     return false;
@@ -1679,7 +1696,7 @@ async function updateWrestlingRoster() {
             'https://www.thesmackdownhotel.com/roster/?promotion=njpw&date=all-time#women',
             'https://www.thesmackdownhotel.com/roster/?promotion=wcw&date=all-time#women',
             'https://www.thesmackdownhotel.com/roster/?promotion=ecw&date=all-time#women',
-            'https://www.thesmackdownhotel.com/roster/?promotion=aaa&date=all-time#women',    
+            'https://www.thesmackdownhotel.com/roster/?promotion=aaa&date=all-time#women',  
             'https://www.thesmackdownhotel.com/roster/?promotion=roh&date=all-time#women',
             'https://www.thesmackdownhotel.com/roster/?promotion=awa&date=all-time#women',
             'https://www.thesmackdownhotel.com/roster/?promotion=nwa&date=all-time#women',
