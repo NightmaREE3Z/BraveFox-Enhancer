@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "BraveFox Enhancer",
-    "version": "22.6.7",
+    "version": "22.6.9",
     "description": "Makes my Interwebs experience more tolerable by filtering out content.",
     "background": {
         "service_worker": "background.js",
@@ -340,7 +340,9 @@
                 "https://github.com/*",
                 "https://www.snapchat.com/*",
                 "https://gemini.google.com/*",
-                "https://www.snapchat.com/web*"
+                "https://www.snapchat.com/web*",
+                "https://nextdns.io/*",
+                "https://my.nextdns.io/*"
             ],
             "js": ["scripts/extra.js"],
             "run_at": "document_start"

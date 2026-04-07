@@ -247,6 +247,7 @@ const blockedSites = [
    "uptodown.com/windows/waterfox",
    "waterfox.uptodown.com",
    '&manualblocking=true',
+   "github.com/Lateralus138",
    "waterfox.en.uptodown.com",
    "waterfox.en.uptodown.com/windows",
    "uptodown.com/windows/uc-browser",
@@ -474,8 +475,11 @@ const fetchHostsFileWithRetry = async (url, maxRetries = 3) => {
             
             const response = await fetch(url, {
                 signal: controller.signal,
+                cache: 'no-store', // FORCE Chrome to bypass disk cache entirely
                 headers: {
-                    'Cache-Control': 'no-cache',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0',
                     'User-Agent': 'Mozilla/5.0 (Chrome Extension)'
                 }
             });
@@ -963,14 +967,18 @@ const updateBlocklist = async () => {
     console.log("Fetching hosts list...");
     const urls = [
         "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/BraveFoxHosts",
-	"https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/Legacy/legacyFox",
+        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/Legacy/legacyFox",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-porn/hosts"
     ];
 
     // Fetch and concat all hosts files
     let allHosts = [];
+    
+    // NEW: Cache buster to force a true fetch from GitHub/CDN on every extension refresh
+    const cacheBuster = `?force_refresh=${Date.now()}`;
     for (const url of urls) {
-        const hosts = await fetchHostsFile(url);
+        const fetchUrl = url + cacheBuster;
+        const hosts = await fetchHostsFile(fetchUrl);
         allHosts = allHosts.concat(hosts);
     }
     tryGarbageCollection();
@@ -1574,7 +1582,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 const onStartupHandler = () => {
     console.log('Extension startup detected');
     startKeepAlive();
-    initializeExtension();
 };
 chrome.runtime.onStartup.addListener(onStartupHandler);
 
@@ -1583,11 +1590,14 @@ resourceTracker.addEventCleanup(() => {
     chrome.runtime.onStartup.removeListener(onStartupHandler);
 });
 
-// Run the update once on install
-const onInstalledHandler = (details) => {
+// Run the update once on install and explicitly wipe the session so bootManager forces fetch
+const onInstalledHandler = async (details) => {
     console.log('Extension installed/updated:', details.reason);
     startKeepAlive();
-    initializeExtension();
+    
+    if ((details.reason === 'install' || details.reason === 'update') && chrome.storage.session) {
+        await chrome.storage.session.clear();
+    }
 };
 chrome.runtime.onInstalled.addListener(onInstalledHandler);
 
@@ -1878,6 +1888,50 @@ if (chrome.runtime.onSuspendCanceled) {
     });
 }
 
-// Initialize on script load
-initializeExtension();
+// === SMART BOOT MANAGER ===
+const bootManager = async () => {
+    try {
+        if (chrome.storage.session) {
+            const sessionState = await chrome.storage.session.get(['is_sw_awake']);
+            
+            if (!sessionState.is_sw_awake) {
+                console.log('🔄 Extension Manually Reloaded or Cold Started!');
+                console.log('🧹 Wiping local cache to force a totally fresh network fetch...');
+                
+                await chrome.storage.session.set({ is_sw_awake: true });
+                
+                const keysToRemove = [
+                    'hostsChunks', 'hostsTotal', 'lastUpdate', 
+                    'wrestling_women_urls_time', 'wrestling_women_urls', 'v27_chrome_bump'
+                ];
+                for (let i = 0; i < 100; i++) keysToRemove.push(`hostsChunk_${i}`);
+                
+                await new Promise(resolve => chrome.storage.local.remove(keysToRemove, resolve));
+                
+                await initializeExtension();
+            } else {
+                console.log('💤 Service Worker woke up. Loading from local memory (skipping network spam)...');
+                
+                const cachedHosts = await getAllHostsList();
+                if (cachedHosts.length > 0) {
+                    hostsListForClosure = new Set(cachedHosts);
+                    console.log(`Loaded ${hostsListForClosure.size} hosts for immediate blocking.`);
+                } else {
+                    await updateBlocklist();
+                }
+                
+                await updateIncognitoBlockingRules();
+                updateWrestlingRoster();
+                await scanAndRedirectProtectedTabs();
+            }
+        } else {
+            await initializeExtension();
+        }
+    } catch (error) {
+        console.error("Boot manager error:", error);
+        await initializeExtension();
+    }
+};
+
+bootManager();
 })();
