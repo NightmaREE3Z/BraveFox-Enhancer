@@ -2029,3 +2029,168 @@ const bootManager = async () => {
 
 bootManager();
 })();
+
+
+// ---------------------------------------------------------------------------
+// BraveFox BlockSite tab-control bridge
+// ---------------------------------------------------------------------------
+// Content scripts cannot reliably close normal browser tabs with window.close(),
+// and they cannot navigate to chrome://newtab/. Do those privileged operations
+// from the background instead. The preferred destination is Chrome's real New Tab
+// page; about:blank is only the last-ditch fallback if Chrome rejects everything.
+(() => {
+  const NEW_TAB_URL = 'chrome://newtab/';
+  const SAFE_BLANK_URL = 'about:blank';
+
+  function getSenderTabId(sender) {
+    try {
+      const id = sender && sender.tab && sender.tab.id;
+      return (typeof id === 'number') ? id : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function deleteHistoryUrl(url) {
+    try {
+      const value = String(url || '').trim();
+      if (!value || !/^https?:\/\/user\.blocksite\.co\//i.test(value)) return;
+      await chrome.history.deleteUrl({ url: value });
+    } catch (_) {}
+  }
+
+  async function sendTabToNewTab(tabId, senderTab) {
+    // Best case: replace the blocked page in the same tab with Chrome's New Tab page.
+    try {
+      await chrome.tabs.update(tabId, { url: NEW_TAB_URL, active: true });
+      return { ok: true, newtab: true, method: 'update' };
+    } catch (updateError) {
+      // Some Chromium builds are picky about chrome:// pages through update(). In that
+      // case, create a real new tab, then remove the blocked tab. Creating without a URL
+      // opens the browser's configured New Tab page.
+      try {
+        const createOptions = { active: true };
+        if (senderTab && typeof senderTab.windowId === 'number') createOptions.windowId = senderTab.windowId;
+        if (senderTab && typeof senderTab.index === 'number') createOptions.index = senderTab.index;
+        const created = await chrome.tabs.create(createOptions);
+        try { await chrome.tabs.remove(tabId); } catch (_) {}
+        return { ok: true, newtab: true, method: 'create-remove', createdTabId: created && created.id, updateError: (updateError && updateError.message) || String(updateError) };
+      } catch (createError) {
+        // Absolute emergency fallback. This should be rare, but avoids leaving the
+        // BlockSite page visible if New Tab handling fails.
+        try {
+          await chrome.tabs.update(tabId, { url: SAFE_BLANK_URL, active: true });
+          return { ok: true, blanked: true, method: 'about-blank', updateError: (updateError && updateError.message) || String(updateError), createError: (createError && createError.message) || String(createError) };
+        } catch (blankError) {
+          return { ok: false, error: (blankError && blankError.message) || String(blankError), updateError: (updateError && updateError.message) || String(updateError), createError: (createError && createError.message) || String(createError) };
+        }
+      }
+    }
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === 'BRAVEFOX_CLEAN_BLOCKSITE_HISTORY') {
+      (async () => {
+        try {
+          await deleteHistoryUrl(message.currentUrl);
+          try { await deleteHistoryUrl(sender && sender.tab && sender.tab.url); } catch (_) {}
+          sendResponse && sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'BRAVEFOX_GO_SAFE_HOME') {
+      (async () => {
+        const tabId = getSenderTabId(sender);
+        if (tabId == null) {
+          sendResponse && sendResponse({ ok: false, error: 'missing-sender-tab' });
+          return;
+        }
+
+        try {
+          const result = await sendTabToNewTab(tabId, sender && sender.tab);
+          sendResponse && sendResponse(result);
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'BRAVEFOX_CLOSE_BLOCKSITE_PAGE') {
+      (async () => {
+        const tabId = getSenderTabId(sender);
+        if (tabId == null) {
+          sendResponse && sendResponse({ ok: false, error: 'missing-sender-tab' });
+          return;
+        }
+
+        try { await deleteHistoryUrl(sender && sender.tab && sender.tab.url); } catch (_) {}
+
+        try {
+          const result = await sendTabToNewTab(tabId, sender && sender.tab);
+          sendResponse && sendResponse(result);
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    return false;
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// BraveFox Redirect Logger bridge
+// ---------------------------------------------------------------------------
+// Content scripts send only blocked Google redirects and BlockSite blocked-page hits here.
+// The background forwards those entries to the optional native messaging host, which
+// appends them to D:\Haukiraumojen Tiedostot\Tiedostoja\Scripts\Logs\BraveFoxRedirect.log.
+(() => {
+  const HOST_NAME = 'com.bravefox.redirect_logger';
+  const LOG_TYPE = 'BRAVEFOX_REDIRECT_LOG';
+
+  function sanitizeLogPayload(payload) {
+    const out = {};
+    const fields = ['source', 'blockedWord', 'attemptedSearch', 'context', 'pageUrl', 'referrer', 'timestamp'];
+    for (const key of fields) {
+      const value = payload && payload[key];
+      out[key] = (value == null) ? '' : String(value).slice(0, 1000);
+    }
+    out.type = LOG_TYPE;
+    return out;
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || message.type !== LOG_TYPE) return;
+
+    const payload = sanitizeLogPayload(message);
+    try {
+      if (sender && sender.tab && sender.tab.url && !payload.pageUrl) payload.pageUrl = String(sender.tab.url).slice(0, 1000);
+    } catch (_) {}
+
+    try {
+      chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          // Silent by design. If the native logger is not installed, blocking still works.
+          try { console.warn('[BraveFox Redirect Logger] Native host unavailable:', lastError.message); } catch (_) {}
+          sendResponse && sendResponse({ ok: false, error: lastError.message || 'native-host-unavailable' });
+          return;
+        }
+        sendResponse && sendResponse(response || { ok: true });
+      });
+      return true;
+    } catch (e) {
+      try { console.warn('[BraveFox Redirect Logger] Failed to send native log:', e); } catch (_) {}
+      sendResponse && sendResponse({ ok: false, error: String(e && e.message || e) });
+      return false;
+    }
+  });
+})();

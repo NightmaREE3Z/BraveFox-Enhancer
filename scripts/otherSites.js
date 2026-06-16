@@ -74,7 +74,7 @@
     let blockSiteRedirectDeadline = 0;
     let lastBlockSiteHistoryCleanupRequest = 0;
     let lastBlockSiteHistoryCleanupUrl = '';
-    const BLOCKSITE_SAFE_DESTINATION = 'chrome://newtab/';
+    const BLOCKSITE_SAFE_DESTINATION = 'about:blank'; // last-ditch local fallback only; background.js sends the tab to New Tab
     const EXTENSION_BLOCKED_PAGE_TEXT = 'Laajennus on estänyt tämän sivun';
     
     // Utils
@@ -116,6 +116,7 @@
             root.classList.toggle('bravefox-blocksite-new-blocked-page', active && !isOldBlockSiteBlockedPage());
             if (active) {
                 requestBlockSiteHistoryCleanup('blocksite-blocked-page-detected');
+                logBlockSiteRedirectReason();
                 if (!root.classList.contains('bravefox-blocksite-ui-ready')) {
                     root.classList.add('bravefox-blocksite-ui-pending');
                 }
@@ -152,6 +153,117 @@
         const cleaned = word.replace(/\+/g, ' ').trim();
         if (!cleaned) return '';
         return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+    }
+
+    function normalizeSearchText(value) {
+        try {
+            return decodeURIComponent(String(value || '').replace(/\+/g, ' ')).replace(/\s+/g, ' ').trim();
+        } catch (e) {
+            return String(value || '').replace(/\+/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+    }
+
+    function getSearchTextFromPossibleUrl(value) {
+        const raw = normalizeSearchText(value);
+        if (!raw) return '';
+
+        try {
+            const maybeUrl = new URL(raw);
+            const q = maybeUrl.searchParams.get('q') || maybeUrl.searchParams.get('query') || maybeUrl.searchParams.get('search') || maybeUrl.searchParams.get('text') || '';
+            if (q && q.trim()) return normalizeSearchText(q);
+        } catch (e) {}
+
+        return raw;
+    }
+
+    function getAttemptedSearchFromBlockSiteContext() {
+        const urlCandidates = [];
+        try {
+            const current = new URL(window.location.href);
+            ['q', 'query', 'search', 'text', 'url', 'blockedUrl', 'blockedURL', 'sourceUrl', 'sourceURL', 'ref', 'referrer', 'from', 'target'].forEach(key => {
+                const value = current.searchParams.get(key);
+                if (value) urlCandidates.push(value);
+            });
+        } catch (e) {}
+
+        try {
+            if (document.referrer) urlCandidates.push(document.referrer);
+        } catch (e) {}
+
+        for (const candidate of urlCandidates) {
+            const search = getSearchTextFromPossibleUrl(candidate);
+            if (search) return search;
+        }
+
+        return normalizeSearchText(getBlockedWordFromUrl());
+    }
+
+    function escapeForRegExp(value) {
+        return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function fillHighlightedText(target, text, trigger) {
+        if (!target) return;
+        target.textContent = '';
+
+        const value = String(text || '').trim();
+        const term = String(trigger || '').trim();
+        if (!value) {
+            target.textContent = 'Ei tiedossa';
+            return;
+        }
+
+        if (!term) {
+            target.textContent = value;
+            return;
+        }
+
+        try {
+            const re = new RegExp(escapeForRegExp(term), 'ig');
+            let last = 0;
+            let match;
+            let hit = false;
+            while ((match = re.exec(value)) !== null) {
+                hit = true;
+                if (match.index > last) target.appendChild(document.createTextNode(value.slice(last, match.index)));
+                const mark = document.createElement('mark');
+                mark.className = 'bravefox-blocksite-trigger-highlight';
+                mark.textContent = value.slice(match.index, match.index + match[0].length);
+                target.appendChild(mark);
+                last = match.index + match[0].length;
+                if (match[0].length === 0) re.lastIndex++;
+            }
+            if (last < value.length) target.appendChild(document.createTextNode(value.slice(last)));
+            if (!hit) target.textContent = value;
+        } catch (e) {
+            target.textContent = value;
+        }
+    }
+
+    let lastBlockSiteRedirectLogKey = '';
+    function logBlockSiteRedirectReason() {
+        try {
+            if (!isBlockSiteBlockedPage()) return;
+            const blockedWord = normalizeSearchText(getBlockedWordFromUrl());
+            const attemptedSearch = getAttemptedSearchFromBlockSiteContext();
+            const key = `${blockedWord}::${attemptedSearch}::${window.location.href}`;
+            if (key === lastBlockSiteRedirectLogKey) return;
+            lastBlockSiteRedirectLogKey = key;
+
+            if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+            chrome.runtime.sendMessage({
+                type: 'BRAVEFOX_REDIRECT_LOG',
+                source: 'BlockSite',
+                blockedWord: blockedWord,
+                attemptedSearch: attemptedSearch,
+                context: 'blocksite-blocked-page',
+                pageUrl: window.location.href,
+                referrer: document.referrer || '',
+                timestamp: new Date().toISOString()
+            }, () => {
+                try { void chrome.runtime.lastError; } catch (e) {}
+            });
+        } catch (e) {}
     }
     function getSecondsUntilBlockSiteRedirect() {
         if (!blockSiteRedirectDeadline) return 60;
@@ -199,9 +311,9 @@
         }
     }
     function goToSafeBlankPage() {
-        let handledByBackground = false;
-
         function fallbackDirectNavigation() {
+            // Do NOT use chrome://newtab/ from a content script. Chrome/Brave rejects it as
+            // a protected internal page and throws "Not allowed to load local resource".
             try {
                 window.location.replace(BLOCKSITE_SAFE_DESTINATION);
             } catch (e) {
@@ -214,27 +326,26 @@
                 ? chrome.runtime
                 : null;
 
-            if (runtime) {
-                handledByBackground = true;
-                let responded = false;
-                const fallbackTimer = setTimeout(() => {
-                    if (!responded) fallbackDirectNavigation();
-                }, 350);
-
-                runtime.sendMessage({ type: 'BRAVEFOX_GO_SAFE_HOME' }, (response) => {
-                    responded = true;
-                    clearTimeout(fallbackTimer);
-                    const lastError = chrome.runtime && chrome.runtime.lastError;
-                    if (lastError || !response || response.ok !== true) {
-                        fallbackDirectNavigation();
-                    }
-                });
+            if (!runtime) {
+                fallbackDirectNavigation();
+                return;
             }
-        } catch (e) {
-            handledByBackground = false;
-        }
 
-        if (!handledByBackground) fallbackDirectNavigation();
+            let responded = false;
+            const fallbackTimer = setTimeout(() => {
+                if (!responded) fallbackDirectNavigation();
+            }, 450);
+
+            runtime.sendMessage({ type: 'BRAVEFOX_GO_SAFE_HOME' }, (response) => {
+                responded = true;
+                clearTimeout(fallbackTimer);
+                let lastError = null;
+                try { lastError = chrome.runtime && chrome.runtime.lastError; } catch (e) {}
+                if (lastError || !response || response.ok !== true) fallbackDirectNavigation();
+            });
+        } catch (e) {
+            fallbackDirectNavigation();
+        }
     }
     function closeOrBlankBlockSitePage(event) {
         try {
@@ -246,61 +357,40 @@
         } catch (e) {}
 
         clearBlockSiteRedirectTimer();
-        requestBlockSiteHistoryCleanup('blocksite-close-click-or-timer');
+        requestBlockSiteHistoryCleanup('blocksite-close-click');
 
-        let backgroundCloseRequested = false;
         if (/blocksite/i.test(window.location.href || '')) {
-            backgroundCloseRequested = requestBackgroundCloseBlockSitePage((response) => {
-                // If the background could not close the tab, use the old local fallback.
+            const backgroundCloseRequested = requestBackgroundCloseBlockSitePage((response) => {
                 if (response && response.ok === true) return;
-                try { window.open('', '_self'); } catch (e) {}
-                try { window.close(); } catch (e) {}
+                // No window.close() fallback here. Content scripts are only allowed to close
+                // tabs/windows they opened themselves, so using window.close() just creates
+                // console errors on BlockSite pages. Background.js should send it to New Tab;
+                // if that fails entirely, use the local about:blank fallback.
                 setTimeout(() => {
                     if (!document.hidden) goToSafeBlankPage();
                 }, 150);
             });
+
+            if (backgroundCloseRequested) return;
         }
 
-        if (!backgroundCloseRequested) {
-            try { window.open('', '_self'); } catch (e) {}
-            try { window.close(); } catch (e) {}
-            // Chrome only closes script-opened tabs/windows. If it refuses, fall back to the Chrome New Tab Page.
-            setTimeout(() => {
-                if (!document.hidden) goToSafeBlankPage();
-            }, 150);
-        }
+        setTimeout(() => {
+            if (!document.hidden) goToSafeBlankPage();
+        }, 150);
     }
     function updateBlockSiteRedirectCountdown() {
+        // v6: automatic BlockSite countdown/close removed. Manual "Sulje sivu" button stays.
+        clearBlockSiteRedirectTimer();
         try {
-            if (!isBlockSiteBlockedPage()) {
-                clearBlockSiteRedirectTimer();
-                return;
-            }
-            const seconds = getSecondsUntilBlockSiteRedirect();
-            document.querySelectorAll('.bravefox-blocksite-redirect-timer').forEach(timer => {
-                timer.textContent = `Suljetaan sivu: ${seconds}s`;
-            });
-            if (seconds <= 0) closeOrBlankBlockSitePage();
+            document.querySelectorAll('.bravefox-blocksite-redirect-timer').forEach(timer => timer.remove());
         } catch (e) {}
     }
     function ensureBlockSiteAutoRedirectTimer() {
+        // v6: no auto-close timer. This prevents Chrome's automatic-close warning while
+        // keeping the manual Close Page button behavior intact.
+        clearBlockSiteRedirectTimer();
         try {
-            if (!isBlockSiteBlockedPage()) {
-                clearBlockSiteRedirectTimer();
-                return;
-            }
-            const now = Date.now();
-            if (!blockSiteRedirectDeadline || blockSiteRedirectDeadline < now) {
-                blockSiteRedirectDeadline = now + 60000;
-            }
-            const delay = Math.max(0, blockSiteRedirectDeadline - now);
-            if (!blockSiteRedirectTimer) {
-                blockSiteRedirectTimer = setTimeout(() => closeOrBlankBlockSitePage(), delay);
-            }
-            if (!blockSiteCountdownTimer) {
-                blockSiteCountdownTimer = setInterval(updateBlockSiteRedirectCountdown, 1000);
-            }
-            updateBlockSiteRedirectCountdown();
+            document.querySelectorAll('.bravefox-blocksite-redirect-timer').forEach(timer => timer.remove());
         } catch (e) {}
     }
     function isExtensionBlockedPageNode(node) {
@@ -569,36 +659,55 @@
         try {
             if (!markBlockSiteBlockedPage()) return;
 
-            const blockedWord = formatBlockedWord(getBlockedWordFromUrl());
+            const rawBlockedWord = normalizeSearchText(getBlockedWordFromUrl());
+            const blockedWord = formatBlockedWord(rawBlockedWord);
+            const attemptedSearch = getAttemptedSearchFromBlockSiteContext();
+            logBlockSiteRedirectReason();
 
             let card = document.getElementById('bravefox-blocksite-blocked-word-card');
             if (!card) {
                 card = document.createElement('div');
                 card.id = 'bravefox-blocksite-blocked-word-card';
 
-                const label = document.createElement('div');
+                const wordRow = document.createElement('div');
+                wordRow.className = 'bravefox-blocksite-info-row bravefox-blocksite-word-row';
+
+                const label = document.createElement('span');
                 label.className = 'bravefox-blocksite-word-label';
 
-                const value = document.createElement('div');
+                const value = document.createElement('span');
                 value.className = 'bravefox-blocksite-word-value';
 
-                const timer = document.createElement('div');
-                timer.className = 'bravefox-blocksite-redirect-timer';
+                const searchRow = document.createElement('div');
+                searchRow.className = 'bravefox-blocksite-info-row bravefox-blocksite-search-row';
 
-                card.appendChild(label);
-                card.appendChild(value);
-                card.appendChild(timer);
+                const searchLabel = document.createElement('span');
+                searchLabel.className = 'bravefox-blocksite-search-label';
+
+                const searchValue = document.createElement('span');
+                searchValue.className = 'bravefox-blocksite-search-value';
+
+                wordRow.appendChild(label);
+                wordRow.appendChild(value);
+                searchRow.appendChild(searchLabel);
+                searchRow.appendChild(searchValue);
+                card.appendChild(wordRow);
+                card.appendChild(searchRow);
             }
 
             const labelEl = card.querySelector('.bravefox-blocksite-word-label');
             const valueEl = card.querySelector('.bravefox-blocksite-word-value');
+            const searchLabelEl = card.querySelector('.bravefox-blocksite-search-label');
+            const searchValueEl = card.querySelector('.bravefox-blocksite-search-value');
             const timerEl = card.querySelector('.bravefox-blocksite-redirect-timer');
 
-            if (labelEl) labelEl.textContent = blockedWord ? 'Estetty sana' : 'Estetty sivu';
+            if (labelEl) labelEl.textContent = rawBlockedWord ? 'Estetty sana:' : 'Estetty sivu:';
             if (valueEl) valueEl.textContent = blockedWord || 'Estetty';
-            if (timerEl) timerEl.textContent = `Suljetaan sivu: ${getSecondsUntilBlockSiteRedirect()}s`;
+            if (searchLabelEl) searchLabelEl.textContent = 'Yritetty haku:';
+            if (searchValueEl) fillHighlightedText(searchValueEl, attemptedSearch || rawBlockedWord || '', rawBlockedWord || blockedWord);
+            if (timerEl) timerEl.remove();
 
-            // v3 unified layout: keep the card out of BlockSite's native layout tree.
+            // v4 unified layout: keep the card out of BlockSite's native layout tree.
             // Both old and new BlockSite builds position this card with fixed CSS, so
             // parking it directly under body prevents old flex/hero wrappers from
             // dragging it into the title/subtitle area.
@@ -606,7 +715,7 @@
                 document.body.appendChild(card);
             }
         } catch (e) {
-            console.warn('BraveFox: Error adding blocked word card:', e);
+            console.warn('BraveFox: Error adding blocked word/search card:', e);
         }
     }
 
@@ -638,13 +747,13 @@
                 'html.bravefox-blocksite-blocked-page [data-bravefox-close-page="true"] { cursor: pointer !important; min-width: 92px !important; min-height: 38px !important; padding: 0 16px !important; border-radius: 10px !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; font-weight: 800 !important; text-align: center !important; position: static !important; left: auto !important; top: auto !important; right: auto !important; bottom: auto !important; transform: none !important; margin: 0 auto !important; }',
                 'html.bravefox-blocksite-blocked-page .bravefox-blocksite-title { position: fixed !important; left: 56px !important; top: clamp(118px, 22vh, 220px) !important; z-index: 2147483000 !important; display: block !important; width: min(780px, calc(100vw - 112px)) !important; margin: 0 !important; padding: 0 !important; color: #fff !important; text-align: left !important; font-size: clamp(48px, 7vw, 88px) !important; line-height: 0.98 !important; font-weight: 900 !important; letter-spacing: -0.045em !important; text-shadow: 0 3px 18px rgba(0,0,0,0.32) !important; }',
                 'html.bravefox-blocksite-blocked-page .bravefox-blocksite-subtitle { position: fixed !important; left: 58px !important; top: calc(clamp(118px, 22vh, 220px) + clamp(66px, 7.6vw, 98px)) !important; z-index: 2147483000 !important; display: block !important; width: min(760px, calc(100vw - 116px)) !important; margin: 0 !important; padding: 0 !important; color: #fff !important; text-align: left !important; font-size: clamp(19px, 2vw, 28px) !important; line-height: 1.25 !important; font-weight: 700 !important; text-shadow: 0 2px 14px rgba(0,0,0,0.34) !important; }',
-                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row { box-sizing: border-box !important; display: flex !important; justify-content: center !important; align-items: center !important; position: fixed !important; left: 0 !important; top: calc(50vh + 98px) !important; width: 100vw !important; max-width: 100vw !important; margin: 0 !important; padding: 0 !important; z-index: 2147483001 !important; transform: none !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row { box-sizing: border-box !important; display: flex !important; justify-content: center !important; align-items: center !important; position: fixed !important; left: 0 !important; top: calc(50vh + 132px) !important; width: 100vw !important; max-width: 100vw !important; margin: 0 !important; padding: 0 !important; z-index: 2147483001 !important; transform: none !important; }',
                 'html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row .bravefox-blocksite-centered-close-button { margin: 0 auto !important; }',
-                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card { box-sizing: border-box !important; width: min(360px, calc(100vw - 32px)) !important; margin: 0 !important; padding: 16px 18px !important; border: 1px solid rgba(255,255,255,0.24) !important; border-radius: 14px !important; background: rgba(7, 22, 35, 0.72) !important; color: #fff !important; text-align: center !important; font-family: inherit !important; box-shadow: 0 12px 32px rgba(0,0,0,0.24) !important; backdrop-filter: blur(8px) !important; position: fixed !important; left: 50vw !important; top: 50vh !important; transform: translate(-50%, -50%) !important; z-index: 2147482999 !important; }',
-                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-label { margin: 0 0 6px 0 !important; font-size: 13px !important; font-weight: 700 !important; letter-spacing: 0.04em !important; text-transform: uppercase !important; opacity: 0.78 !important; }',
-                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-value { margin: 0 !important; font-size: 24px !important; line-height: 1.2 !important; font-weight: 800 !important; overflow-wrap: anywhere !important; }',
-                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-redirect-timer { margin: 12px 0 0 0 !important; padding-top: 10px !important; border-top: 1px solid rgba(255,255,255,0.18) !important; font-size: 14px !important; line-height: 1.35 !important; font-weight: 700 !important; opacity: 0.9 !important; }',
-                '@media (max-width: 900px) { html.bravefox-blocksite-blocked-page .bravefox-blocksite-title { left: 24px !important; top: 96px !important; width: calc(100vw - 48px) !important; font-size: 46px !important; } html.bravefox-blocksite-blocked-page .bravefox-blocksite-subtitle { left: 26px !important; top: 154px !important; width: calc(100vw - 52px) !important; font-size: 19px !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card { top: 54vh !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row { top: calc(54vh + 98px) !important; } }'
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card { box-sizing: border-box !important; width: min(560px, calc(100vw - 32px)) !important; margin: 0 !important; padding: 16px 18px !important; border: 1px solid rgba(255,255,255,0.24) !important; border-radius: 14px !important; background: rgba(7, 22, 35, 0.72) !important; color: #fff !important; text-align: left !important; font-family: inherit !important; box-shadow: 0 12px 32px rgba(0,0,0,0.24) !important; backdrop-filter: blur(8px) !important; position: fixed !important; left: 50vw !important; top: 50vh !important; transform: translate(-50%, -50%) !important; z-index: 2147482999 !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-info-row { display: grid !important; grid-template-columns: 132px minmax(0, 1fr) !important; gap: 10px !important; align-items: baseline !important; margin: 0 0 8px 0 !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-label, html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-search-label { margin: 0 !important; font-size: 12px !important; font-weight: 800 !important; letter-spacing: 0.04em !important; text-transform: uppercase !important; opacity: 0.78 !important; white-space: nowrap !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-value { margin: 0 !important; font-size: 22px !important; line-height: 1.2 !important; font-weight: 900 !important; overflow-wrap: anywhere !important; }',
+                '@media (max-width: 900px) { html.bravefox-blocksite-blocked-page .bravefox-blocksite-title { left: 24px !important; top: 96px !important; width: calc(100vw - 48px) !important; font-size: 46px !important; } html.bravefox-blocksite-blocked-page .bravefox-blocksite-subtitle { left: 26px !important; top: 154px !important; width: calc(100vw - 52px) !important; font-size: 19px !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card { top: 54vh !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row { top: calc(54vh + 132px) !important; } }'
             ];
             
             // NextDNS pre-hide: prevent "Forgot password?" flash on any my.nextdns.io / nextdns.io pages
