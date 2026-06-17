@@ -2155,6 +2155,143 @@ bootManager();
 (() => {
   const HOST_NAME = 'com.bravefox.redirect_logger';
   const LOG_TYPE = 'BRAVEFOX_REDIRECT_LOG';
+  const GOOGLE_QUERY_CONTEXT_TYPE = 'BRAVEFOX_GOOGLE_QUERY_CONTEXT';
+  const GET_GOOGLE_QUERY_CONTEXT_TYPE = 'BRAVEFOX_GET_LAST_GOOGLE_QUERY_CONTEXT';
+
+  const recentGoogleQueryByTab = new Map();
+  let recentGlobalGoogleQuery = null;
+  const GOOGLE_QUERY_MAX_AGE_MS = 2 * 60 * 1000;
+
+  function cleanShortText(value, maxLength = 1000) {
+    return (value == null) ? '' : String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+  }
+
+  function parseGoogleSearchQueryFromUrl(inputUrl) {
+    try {
+      const url = new URL(String(inputUrl || ''));
+      const host = (url.hostname || '').toLowerCase();
+      if (!/^([a-z0-9-]+\.)?google\./i.test(host) && !/\.google\./i.test(host)) return '';
+      const q = url.searchParams.get('q') || url.searchParams.get('query') || url.searchParams.get('search') || '';
+      return cleanShortText(q, 1000);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function normalizeForCompare(value) {
+    return cleanShortText(value, 1000).toLowerCase();
+  }
+
+  function rememberGoogleQueryContext(tabId, inputUrl, attemptedSearch, source) {
+    try {
+      const query = cleanShortText(attemptedSearch || parseGoogleSearchQueryFromUrl(inputUrl), 1000);
+      if (!query) return null;
+
+      const context = {
+        query,
+        pageUrl: cleanShortText(inputUrl || '', 1000),
+        source: cleanShortText(source || 'google', 80),
+        timestamp: Date.now()
+      };
+
+      if (typeof tabId === 'number' && tabId >= 0) {
+        recentGoogleQueryByTab.set(tabId, context);
+      }
+      recentGlobalGoogleQuery = context;
+      pruneOldGoogleQueryContexts();
+      return context;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pruneOldGoogleQueryContexts() {
+    try {
+      const now = Date.now();
+      for (const [tabId, context] of recentGoogleQueryByTab.entries()) {
+        if (!context || now - (context.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) {
+          recentGoogleQueryByTab.delete(tabId);
+        }
+      }
+      if (recentGlobalGoogleQuery && now - (recentGlobalGoogleQuery.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) {
+        recentGlobalGoogleQuery = null;
+      }
+    } catch (_) {}
+  }
+
+  function isGoogleQueryCandidateUseful(context, blockedWord) {
+    try {
+      if (!context || !context.query) return false;
+      if (Date.now() - (context.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) return false;
+
+      const term = normalizeForCompare(blockedWord);
+      if (!term) return true;
+
+      const query = normalizeForCompare(context.query);
+      if (!query) return false;
+      return query.includes(term);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function getBestRecentGoogleQueryContext(sender, blockedWord) {
+    pruneOldGoogleQueryContexts();
+
+    try {
+      const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+      const byTab = recentGoogleQueryByTab.get(tabId);
+      if (isGoogleQueryCandidateUseful(byTab, blockedWord)) return byTab;
+    } catch (_) {}
+
+    if (isGoogleQueryCandidateUseful(recentGlobalGoogleQuery, blockedWord)) return recentGlobalGoogleQuery;
+    return null;
+  }
+
+  function highlightSearchForPlainLog(value, trigger) {
+    const text = cleanShortText(value, 1000);
+    const term = cleanShortText(trigger, 240);
+    if (!text || !term) return text;
+
+    try {
+      const alreadyMarked = new RegExp('\\*' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\*', 'i');
+      if (alreadyMarked.test(text)) return text;
+
+      const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+      let hit = false;
+      const highlighted = text.replace(re, (match) => {
+        hit = true;
+        return '*' + match + '*';
+      });
+      return hit ? highlighted : text;
+    } catch (_) {
+      return text;
+    }
+  }
+
+  try {
+    if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+      chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+        try {
+          if (!details || details.frameId !== 0) return;
+          const query = parseGoogleSearchQueryFromUrl(details.url);
+          if (query) rememberGoogleQueryContext(details.tabId, details.url, query, 'webNavigation');
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+
+  try {
+    if (chrome.tabs && chrome.tabs.onUpdated) {
+      chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        try {
+          const url = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+          const query = parseGoogleSearchQueryFromUrl(url);
+          if (query) rememberGoogleQueryContext(tabId, url, query, 'tabs.onUpdated');
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
 
   function sanitizeLogPayload(payload) {
     const out = {};
@@ -2168,11 +2305,50 @@ bootManager();
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || message.type !== LOG_TYPE) return;
+    if (!message || !message.type) return;
+
+    if (message.type === GOOGLE_QUERY_CONTEXT_TYPE) {
+      try {
+        const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+        const context = rememberGoogleQueryContext(tabId, message.pageUrl || (sender && sender.tab && sender.tab.url) || '', message.attemptedSearch || message.query || '', 'content-script');
+        sendResponse && sendResponse({ ok: !!context });
+      } catch (_) {
+        sendResponse && sendResponse({ ok: false });
+      }
+      return;
+    }
+
+    if (message.type === GET_GOOGLE_QUERY_CONTEXT_TYPE) {
+      try {
+        const blockedWord = message.blockedWord || '';
+        const context = getBestRecentGoogleQueryContext(sender, blockedWord);
+        sendResponse && sendResponse({
+          ok: !!context,
+          attemptedSearch: context ? context.query : '',
+          query: context ? context.query : '',
+          pageUrl: context ? context.pageUrl : '',
+          source: context ? context.source : '',
+          ageMs: context ? (Date.now() - (context.timestamp || 0)) : 0
+        });
+      } catch (_) {
+        sendResponse && sendResponse({ ok: false, attemptedSearch: '', query: '' });
+      }
+      return;
+    }
+
+    if (message.type !== LOG_TYPE) return;
 
     const payload = sanitizeLogPayload(message);
     try {
       if (sender && sender.tab && sender.tab.url && !payload.pageUrl) payload.pageUrl = String(sender.tab.url).slice(0, 1000);
+    } catch (_) {}
+
+    try {
+      const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+      if (payload.attemptedSearch) {
+        rememberGoogleQueryContext(tabId, payload.pageUrl || (sender && sender.tab && sender.tab.url) || '', payload.attemptedSearch, 'redirect-log');
+      }
+      payload.attemptedSearch = highlightSearchForPlainLog(payload.attemptedSearch, payload.blockedWord);
     } catch (_) {}
 
     try {

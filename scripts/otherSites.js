@@ -198,6 +198,71 @@
         return normalizeSearchText(getBlockedWordFromUrl());
     }
 
+    function blockSiteSearchLooksUseful(search, blockedWord) {
+        try {
+            const value = normalizeSearchText(search);
+            const term = normalizeSearchText(blockedWord);
+            if (!value) return false;
+            if (!term) return true;
+            if (value.toLowerCase() === term.toLowerCase()) return false;
+            return value.toLowerCase().includes(term.toLowerCase()) || value.length > term.length + 2;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function requestRecentGoogleSearchForBlockSite(blockedWord, callback) {
+        try {
+            const runtime = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage)
+                ? chrome.runtime
+                : null;
+            if (!runtime) {
+                callback && callback('');
+                return false;
+            }
+
+            runtime.sendMessage({
+                type: 'BRAVEFOX_GET_LAST_GOOGLE_QUERY_CONTEXT',
+                blockedWord: normalizeSearchText(blockedWord),
+                pageUrl: window.location.href,
+                referrer: document.referrer || '',
+                timestamp: new Date().toISOString()
+            }, (response) => {
+                try { void chrome.runtime.lastError; } catch (e) {}
+                try {
+                    const search = normalizeSearchText(response && (response.attemptedSearch || response.query || ''));
+                    callback && callback(search);
+                } catch (e) {
+                    callback && callback('');
+                }
+            });
+            return true;
+        } catch (e) {
+            try { callback && callback(''); } catch (_) {}
+            return false;
+        }
+    }
+
+    function resolveBlockSiteAttemptedSearchAsync(blockedWord, callback) {
+        const fallback = getAttemptedSearchFromBlockSiteContext();
+        if (blockSiteSearchLooksUseful(fallback, blockedWord)) {
+            callback && callback(fallback);
+            return;
+        }
+
+        const requested = requestRecentGoogleSearchForBlockSite(blockedWord, (search) => {
+            if (blockSiteSearchLooksUseful(search, blockedWord)) {
+                callback && callback(search);
+            } else {
+                callback && callback(fallback);
+            }
+        });
+
+        if (!requested) {
+            callback && callback(fallback);
+        }
+    }
+
     function escapeForRegExp(value) {
         return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -241,27 +306,40 @@
     }
 
     let lastBlockSiteRedirectLogKey = '';
+    let lastBlockSiteRedirectLogRequestKey = '';
+    let lastBlockSiteRedirectLogRequestAt = 0;
     function logBlockSiteRedirectReason() {
         try {
             if (!isBlockSiteBlockedPage()) return;
             const blockedWord = normalizeSearchText(getBlockedWordFromUrl());
-            const attemptedSearch = getAttemptedSearchFromBlockSiteContext();
-            const key = `${blockedWord}::${attemptedSearch}::${window.location.href}`;
-            if (key === lastBlockSiteRedirectLogKey) return;
-            lastBlockSiteRedirectLogKey = key;
+            const requestKey = `${blockedWord}::${window.location.href}`;
+            const now = Date.now();
+            if (requestKey === lastBlockSiteRedirectLogRequestKey && now - lastBlockSiteRedirectLogRequestAt < 1500) return;
+            lastBlockSiteRedirectLogRequestKey = requestKey;
+            lastBlockSiteRedirectLogRequestAt = now;
 
-            if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
-            chrome.runtime.sendMessage({
-                type: 'BRAVEFOX_REDIRECT_LOG',
-                source: 'BlockSite',
-                blockedWord: blockedWord,
-                attemptedSearch: attemptedSearch,
-                context: 'blocksite-blocked-page',
-                pageUrl: window.location.href,
-                referrer: document.referrer || '',
-                timestamp: new Date().toISOString()
-            }, () => {
-                try { void chrome.runtime.lastError; } catch (e) {}
+            resolveBlockSiteAttemptedSearchAsync(blockedWord, (attemptedSearch) => {
+                try {
+                    const finalAttemptedSearch = normalizeSearchText(attemptedSearch || getStickyBlockSiteAttemptedSearch(blockedWord, blockedWord) || getAttemptedSearchFromBlockSiteContext());
+                    if (blockedWord && !blockSiteSearchLooksUseful(finalAttemptedSearch, blockedWord)) return;
+                    const key = `${blockedWord}::${finalAttemptedSearch}::${window.location.href}`;
+                    if (key === lastBlockSiteRedirectLogKey) return;
+                    lastBlockSiteRedirectLogKey = key;
+
+                    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) return;
+                    chrome.runtime.sendMessage({
+                        type: 'BRAVEFOX_REDIRECT_LOG',
+                        source: 'BlockSite',
+                        blockedWord: blockedWord,
+                        attemptedSearch: finalAttemptedSearch,
+                        context: 'blocksite-blocked-page',
+                        pageUrl: window.location.href,
+                        referrer: document.referrer || '',
+                        timestamp: new Date().toISOString()
+                    }, () => {
+                        try { void chrome.runtime.lastError; } catch (e) {}
+                    });
+                } catch (e) {}
             });
         } catch (e) {}
     }
@@ -655,6 +733,110 @@
 
         return hiddenCount;
     }
+    function setBlockSiteSearchCardValue(rawBlockedWord, blockedWord, attemptedSearch) {
+        try {
+            const card = document.getElementById('bravefox-blocksite-blocked-word-card');
+            if (!card) return;
+            const searchValueEl = card.querySelector('.bravefox-blocksite-search-value');
+            if (!searchValueEl) return;
+
+            const term = rawBlockedWord || blockedWord;
+            const value = normalizeSearchText(attemptedSearch);
+            const current = normalizeSearchText(searchValueEl.getAttribute('data-bravefox-current-search') || '');
+            const currentUseful = blockSiteSearchLooksUseful(current, term);
+            const valueUseful = blockSiteSearchLooksUseful(value, term);
+
+            // Never downgrade a resolved full Google query back to the bare BlockSite word.
+            // The page updater runs repeatedly because BlockSite mutates its own DOM; without
+            // this guard the card flickers between "gen1r" and "computergen1ral".
+            if (!valueUseful && currentUseful) return;
+            if (!valueUseful) {
+                clearBlockSiteSearchCardPendingIfEmpty(searchValueEl, rawBlockedWord, blockedWord);
+                return;
+            }
+
+            rememberUsefulBlockSiteAttemptedSearch(rawBlockedWord, blockedWord, value);
+            searchValueEl.removeAttribute('data-bravefox-search-pending');
+            searchValueEl.setAttribute('data-bravefox-current-search', value);
+            fillHighlightedText(searchValueEl, value, term);
+        } catch (e) {}
+    }
+
+    let lastBlockSiteSearchResolveKey = '';
+    let lastBlockSiteSearchResolveAt = 0;
+    let blockSiteStickyAttemptedSearchKey = '';
+    let blockSiteStickyAttemptedSearch = '';
+
+    function getBlockSiteSearchStateKey(rawBlockedWord, blockedWord) {
+        return `${normalizeSearchText(rawBlockedWord || blockedWord || '')}::${window.location.href}`;
+    }
+
+    function rememberUsefulBlockSiteAttemptedSearch(rawBlockedWord, blockedWord, attemptedSearch) {
+        try {
+            const term = rawBlockedWord || blockedWord;
+            const value = normalizeSearchText(attemptedSearch);
+            if (!blockSiteSearchLooksUseful(value, term)) return '';
+            blockSiteStickyAttemptedSearchKey = getBlockSiteSearchStateKey(rawBlockedWord, blockedWord);
+            blockSiteStickyAttemptedSearch = value;
+            return value;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function getStickyBlockSiteAttemptedSearch(rawBlockedWord, blockedWord) {
+        try {
+            const key = getBlockSiteSearchStateKey(rawBlockedWord, blockedWord);
+            if (key !== blockSiteStickyAttemptedSearchKey) return '';
+            if (!blockSiteSearchLooksUseful(blockSiteStickyAttemptedSearch, rawBlockedWord || blockedWord)) return '';
+            return blockSiteStickyAttemptedSearch;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function clearBlockSiteSearchCardPendingIfEmpty(searchValueEl, rawBlockedWord, blockedWord) {
+        try {
+            if (!searchValueEl) return;
+            const current = searchValueEl.getAttribute('data-bravefox-current-search') || '';
+            if (blockSiteSearchLooksUseful(current, rawBlockedWord || blockedWord)) return;
+            searchValueEl.textContent = '';
+            searchValueEl.setAttribute('data-bravefox-current-search', '');
+            searchValueEl.setAttribute('data-bravefox-search-pending', 'true');
+        } catch (e) {}
+    }
+
+    function refreshBlockSiteSearchCardFromRecentGoogle(rawBlockedWord, blockedWord, currentAttemptedSearch) {
+        try {
+            const term = rawBlockedWord || blockedWord;
+            const usefulCurrent = rememberUsefulBlockSiteAttemptedSearch(rawBlockedWord, blockedWord, currentAttemptedSearch);
+            if (usefulCurrent) {
+                setBlockSiteSearchCardValue(rawBlockedWord, blockedWord, usefulCurrent);
+                return;
+            }
+
+            const sticky = getStickyBlockSiteAttemptedSearch(rawBlockedWord, blockedWord);
+            if (sticky) {
+                setBlockSiteSearchCardValue(rawBlockedWord, blockedWord, sticky);
+                return;
+            }
+
+            const resolveKey = getBlockSiteSearchStateKey(rawBlockedWord, blockedWord);
+            const now = Date.now();
+            if (resolveKey === lastBlockSiteSearchResolveKey && now - lastBlockSiteSearchResolveAt < 700) return;
+            lastBlockSiteSearchResolveKey = resolveKey;
+            lastBlockSiteSearchResolveAt = now;
+
+            requestRecentGoogleSearchForBlockSite(term, (search) => {
+                try {
+                    const usefulSearch = rememberUsefulBlockSiteAttemptedSearch(rawBlockedWord, blockedWord, search);
+                    if (!usefulSearch) return;
+                    setBlockSiteSearchCardValue(rawBlockedWord, blockedWord, usefulSearch);
+                } catch (e) {}
+            });
+        } catch (e) {}
+    }
+
     function upsertBlockedWordCard() {
         try {
             if (!markBlockSiteBlockedPage()) return;
@@ -704,7 +886,14 @@
             if (labelEl) labelEl.textContent = rawBlockedWord ? 'Estetty sana:' : 'Estetty sivu:';
             if (valueEl) valueEl.textContent = blockedWord || 'Estetty';
             if (searchLabelEl) searchLabelEl.textContent = 'Yritetty haku:';
-            if (searchValueEl) fillHighlightedText(searchValueEl, attemptedSearch || rawBlockedWord || '', rawBlockedWord || blockedWord);
+            if (searchValueEl) {
+                const stickySearch = getStickyBlockSiteAttemptedSearch(rawBlockedWord, blockedWord);
+                const usefulImmediateSearch = blockSiteSearchLooksUseful(attemptedSearch, rawBlockedWord || blockedWord) ? attemptedSearch : '';
+                const valueToShow = stickySearch || usefulImmediateSearch;
+                if (valueToShow) setBlockSiteSearchCardValue(rawBlockedWord, blockedWord, valueToShow);
+                else clearBlockSiteSearchCardPendingIfEmpty(searchValueEl, rawBlockedWord, blockedWord);
+            }
+            refreshBlockSiteSearchCardFromRecentGoogle(rawBlockedWord, blockedWord, attemptedSearch);
             if (timerEl) timerEl.remove();
 
             // v4 unified layout: keep the card out of BlockSite's native layout tree.
@@ -753,6 +942,8 @@
                 'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-info-row { display: grid !important; grid-template-columns: 132px minmax(0, 1fr) !important; gap: 10px !important; align-items: baseline !important; margin: 0 0 8px 0 !important; }',
                 'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-label, html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-search-label { margin: 0 !important; font-size: 12px !important; font-weight: 800 !important; letter-spacing: 0.04em !important; text-transform: uppercase !important; opacity: 0.78 !important; white-space: nowrap !important; }',
                 'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-word-value { margin: 0 !important; font-size: 22px !important; line-height: 1.2 !important; font-weight: 900 !important; overflow-wrap: anywhere !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-search-value { margin: 0 !important; font-size: 13px !important; line-height: 1.28 !important; font-weight: 700 !important; overflow-wrap: anywhere !important; word-break: break-word !important; }',
+                'html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card .bravefox-blocksite-trigger-highlight { display: inline !important; margin: 0 1px !important; padding: 0 2px !important; border-radius: 2px !important; background: #fff200 !important; color: #111 !important; font: inherit !important; font-weight: 900 !important; }',
                 '@media (max-width: 900px) { html.bravefox-blocksite-blocked-page .bravefox-blocksite-title { left: 24px !important; top: 96px !important; width: calc(100vw - 48px) !important; font-size: 46px !important; } html.bravefox-blocksite-blocked-page .bravefox-blocksite-subtitle { left: 26px !important; top: 154px !important; width: calc(100vw - 52px) !important; font-size: 19px !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-blocked-word-card { top: 54vh !important; } html.bravefox-blocksite-blocked-page #bravefox-blocksite-close-row.bravefox-blocksite-action-row { top: calc(54vh + 132px) !important; } }'
             ];
             
