@@ -12,7 +12,6 @@
     "declarativeNetRequestWithHostAccess",
     "storage",
     "history",
-    "system.memory",
     "webNavigation",
     "tabs",
     "nativeMessaging"
