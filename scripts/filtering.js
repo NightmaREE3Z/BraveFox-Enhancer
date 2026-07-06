@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         FilterContent
-// @version      1.26
+// @name         Content hiding and filtering
+// @version      2026-07-07
 // @description  Filter out stuff on the internet (Targeted Enforcer)
 // @match        *://*/* 
 // @grant        none
@@ -9,9 +9,9 @@
 (function () {
     'use strict';
 
-    // === THE LEASH ===
-    // 'eHZpZGVvcy5jb20=' is Base64 for the target site.
-    const targetDomains = [atob('eHZpZGVvcy5jb20=')];
+    // === TARGET SITES FOR **FILTERING/HIDING** CONTENT ===
+    // This extension does NOT encourage or otherwise facilitate the use or access to adult content sites in under any circumstance. The only purpose of this function/file is to filter out certain types of content from XVideos for myself, such as AI-generated stuff. 
+    const targetDomains = ['xvideos.com'];
     const currentHost = window.location.hostname.toLowerCase();
     
     if (!targetDomains.some(domain => currentHost.includes(domain))) {
