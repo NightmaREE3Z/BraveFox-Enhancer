@@ -9,9 +9,8 @@
 (function () {
     'use strict';
 
-    // === THE NINJA LEASH ===
+    // === THE LEASH ===
     // 'eHZpZGVvcy5jb20=' is Base64 for the target site.
-    // This completely hides the adult URL from Google Web Store automated scanners.
     const targetDomains = [atob('eHZpZGVvcy5jb20=')];
     const currentHost = window.location.hostname.toLowerCase();
     
