@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "26.1.4",
+  "version": "26.1.5",
   "description": "Makes my Interwebs experience more tolerable by filtering out content.",
   "background": {
     "service_worker": "background.js",
@@ -438,15 +438,6 @@
       ],
       "js": [
         "scripts/wrestling.js"
-      ],
-      "run_at": "document_start"
-    },
-    {
-      "matches": [
-        "*://*/*"
-      ],
-      "js": [
-        "scripts/filtering.js"
       ],
       "run_at": "document_start"
     }
