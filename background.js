@@ -145,6 +145,59 @@ const edgeRegex = /^https?:\/\/([a-z0-9-]+\.)*microsoft\.com(\/[a-z]{2}-[a-z]{2}
 // Add msedge.net (also used by Microsoft Edge marketing/redirects sometimes)
 const msedgeRegex = /^https?:\/\/([a-z0-9-]+\.)*msedge\.net(\/|$|[?#])/i;
 
+// Explicit domain allowlist. A base-domain entry also permits its normal subdomains
+// (for example, "xvideos.com" also permits "www.xvideos.com").
+const allowedSites = new Set([
+    "xvideos.com"
+]);
+
+// Dedicated high-priority DNR allow rule. This immediately overrides any older
+// xvideos.com block rule that may still exist while the fetched lists refresh.
+const ALLOWLIST_RULE_ID = 49999;
+
+const isAllowlistedHostname = (hostname) => {
+    if (!hostname || typeof hostname !== 'string') return false;
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, '');
+
+    for (const domain of allowedSites) {
+        const normalizedDomain = domain.toLowerCase();
+        if (normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`)) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+const updateAllowlistRules = async () => {
+    const allowRules = Array.from(allowedSites).map((domain, index) => ({
+        id: ALLOWLIST_RULE_ID + index,
+        priority: 1000,
+        action: { type: 'allow' },
+        condition: {
+            urlFilter: `||${domain}^`,
+            resourceTypes: ['main_frame'],
+            isUrlFilterCaseSensitive: false
+        }
+    }));
+
+    const allowRuleIds = allowRules.map(rule => rule.id);
+
+    await new Promise((resolve) => {
+        chrome.declarativeNetRequest.updateDynamicRules({
+            removeRuleIds: allowRuleIds,
+            addRules: allowRules
+        }, () => {
+            if (chrome.runtime.lastError) {
+                console.error('Failed to apply domain allowlist rules:', chrome.runtime.lastError.message);
+            } else {
+                console.log(`Applied ${allowRules.length} domain allowlist rule(s): ${Array.from(allowedSites).join(', ')}`);
+            }
+            resolve();
+        });
+    });
+};
+
 // Blocklist for other domains if needed
 const blockedSites = [
    "microsoft365.com",
@@ -301,6 +354,7 @@ const blockedSites = [
    "irc-galleria.fi",
    "irc.fi",
    "reddit.com/r/comfyui",
+   "xvideos.com/c/AI-239",
    "comfy.org",
    "runcomfy.com",
    "facebook.com/prowrestlingworld",
@@ -951,6 +1005,9 @@ const manageDynamicRules = async (hostsList) => {
 // Enhanced initialization function for force-installed extensions
 const initializeExtension = async () => {
     console.log('Initializing extension...');
+
+    // Apply the explicit allowlist before cached/legacy block rules can affect navigation.
+    await updateAllowlistRules();
     
     // Check if we have cached hosts first
     const cachedHosts = await getAllHostsList();
@@ -991,9 +1048,11 @@ const updateBlocklist = async () => {
     }
     tryGarbageCollection();
 
-    // Deduplicate
-    const uniqueHostsList = Array.from(new Set(allHosts));
-    console.log(`Unique hosts list has ${uniqueHostsList.length} hosts`);
+    // Deduplicate, then remove explicitly allowlisted domains and their subdomains.
+    const deduplicatedHosts = Array.from(new Set(allHosts));
+    const uniqueHostsList = deduplicatedHosts.filter(host => !isAllowlistedHostname(host));
+    const allowlistedHostsRemoved = deduplicatedHosts.length - uniqueHostsList.length;
+    console.log(`Unique hosts list has ${uniqueHostsList.length} hosts (${allowlistedHostsRemoved} allowlisted entries removed)`);
 
     // Update in-memory hosts list for immediate tab closure checking (ALL hosts)
     hostsListForClosure = new Set(uniqueHostsList);
@@ -1001,6 +1060,10 @@ const updateBlocklist = async () => {
 
     // Use new dynamic rule management system
     await manageDynamicRules(uniqueHostsList);
+
+    // manageDynamicRules intentionally clears old dynamic rules, so restore the
+    // high-priority allow rule after rebuilding the block rules.
+    await updateAllowlistRules();
     
     // Store full list regardless of DNR limits
     storeHostsList(uniqueHostsList);
@@ -1086,6 +1149,13 @@ const getHostnameFromUrl = (url) => {
 // Check if URL should be blocked (for immediate tab closure)
 const isBlockedUrl = (url) => {
     if (!url) return false;
+
+    const hostname = getHostnameFromUrl(url);
+
+    // Explicit allowlist always wins over fetched hosts, generic URL checks, and TLD checks.
+    if (hostname && isAllowlistedHostname(hostname)) {
+        return false;
+    }
     
     // Check against regex patterns
     if (edgeRegex.test(url) || msedgeRegex.test(url)) {
@@ -1098,7 +1168,6 @@ const isBlockedUrl = (url) => {
     }
 
     // Check against hosts list from fetched files
-    const hostname = getHostnameFromUrl(url);
     if (hostname) {
         if (hostsListForClosure.has(hostname)) {
             return true;
@@ -2010,6 +2079,9 @@ const bootManager = async () => {
                 await initializeExtension();
             } else {
                 console.log('💤 Service Worker woke up. Loading from local memory (skipping network spam)...');
+
+                // Reassert the allow rule on every service-worker wake.
+                await updateAllowlistRules();
                 
                 const cachedHosts = await getAllHostsList();
                 if (cachedHosts.length > 0) {

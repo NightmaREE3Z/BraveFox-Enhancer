@@ -14,6 +14,33 @@
     // --- HELPER UTILITIES ---
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+    // Query strings such as ?source=...&groupId=... are page state, not a different route.
+    // Match the Block Sites page by origin + pathname so every query/hash variation works.
+    function isBlockSitesRoute(urlValue = window.location.href) {
+        try {
+            const url = new URL(urlValue, window.location.origin);
+            const hostMatches = url.hostname.toLowerCase() === 'user.blocksite.co';
+            const normalizedPath = url.pathname.replace(/\/+$/, '').toUpperCase();
+            return hostMatches && (
+                normalizedPath === '/OPTIONS/BLOCK_SITES' ||
+                normalizedPath.startsWith('/OPTIONS/BLOCK_SITES/')
+            );
+        } catch (error) {
+            return false;
+        }
+    }
+
+    let lastKnownRouteUrl = window.location.href;
+    let reinjectTimer = null;
+
+    function scheduleControlCenterInjection(delay = 0) {
+        if (reinjectTimer) clearTimeout(reinjectTimer);
+        reinjectTimer = setTimeout(() => {
+            reinjectTimer = null;
+            injectControlCenter();
+        }, delay);
+    }
+
     // Ucey Coder React Bypass: Forces the Virtual DOM to recognize input changes
     function setNativeValue(element, value) {
         if (!element) return;
@@ -462,13 +489,29 @@
 
     // --- THE COMMAND CENTER INJECTOR ---
     function injectControlCenter() {
-        const addBtn = document.querySelector('[data-automation="add-items-button"]');
-        if (!addBtn) return;
-
         const existingGroup = document.getElementById('bravefox-control-center');
-        if (existingGroup && document.body.contains(existingGroup)) return;
 
-        console.log('BraveFox: Building Central UI Command Center...');
+        // Keep the script dormant outside /options/BLOCK_SITES and clean up stale SPA UI.
+        if (!isBlockSitesRoute()) {
+            if (existingGroup && existingGroup.isConnected) existingGroup.remove();
+            return;
+        }
+
+        const addBtn = document.querySelector('[data-automation="add-items-button"]');
+        if (!addBtn || !addBtn.isConnected) return;
+
+        // BlockSite remounts this toolbar when query parameters/group state change.
+        // Work out the current live insertion point every time instead of trusting the old one.
+        const addItemsWrapper = addBtn.closest('.add-items-btn-wrapper') || addBtn.parentElement;
+        const parentFlex = (addItemsWrapper && addItemsWrapper.parentElement) || addBtn.parentElement;
+        if (!parentFlex) return;
+
+        if (existingGroup && existingGroup.isConnected) {
+            if (existingGroup.parentElement !== parentFlex) parentFlex.appendChild(existingGroup);
+            return;
+        }
+
+        console.log(`BraveFox: Building Central UI Command Center for ${window.location.pathname}${window.location.search}`);
 
         if (!document.getElementById('bravefox-styles')) {
             const style = document.createElement('style');
@@ -507,8 +550,12 @@
         const impLinks = document.createElement('div');
         impLinks.style.cssText = btnStyle + 'color: #616161; border-color: #616161; position: relative;';
         impLinks.innerHTML = `<div>Import Links</div>`;
-        impLinks.onclick = () => {
-            const nativeImp = document.querySelector('[data-automation="import-file-input"]');
+        impLinks.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const nativeImp = document.querySelector(
+                '[data-automation="import-file-input"], input[type="file"][data-automation*="import"]'
+            );
             if (nativeImp && typeof nativeImp.click === 'function') nativeImp.click();
             else alert('BraveFox: Native Link Import input not found in DOM!');
         };
@@ -516,8 +563,12 @@
         const expLinks = document.createElement('div');
         expLinks.style.cssText = btnStyle + 'color: #616161; border-color: #616161;';
         expLinks.textContent = 'Export Links';
-        expLinks.onclick = () => {
-            const nativeExp = document.querySelector('[data-automation="export-button"]');
+        expLinks.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const nativeExp = document.querySelector(
+                '[data-automation="export-button"], button[data-automation*="export"]'
+            );
             if (nativeExp && typeof nativeExp.click === 'function') nativeExp.click();
             else alert('BraveFox: Native Link Export button not found in DOM!');
         };
@@ -556,17 +607,15 @@
         btnGroup.appendChild(expTerms);
         btnGroup.appendChild(batchRemove);
 
-        const addItemsWrapper = addBtn.closest('.add-items-btn-wrapper');
-        if (addItemsWrapper && addItemsWrapper.parentElement) {
-            const parentFlex = addItemsWrapper.parentElement;
-            parentFlex.style.display = 'flex';
-            parentFlex.style.alignItems = 'center';
-            parentFlex.appendChild(btnGroup);
-        }
+        parentFlex.style.display = 'flex';
+        parentFlex.style.alignItems = 'center';
+        parentFlex.appendChild(btnGroup);
     }
 
+    // React can replace the toolbar without performing a traditional page load.
+    // A throttled observer catches remounts without rebuilding the controls repeatedly.
     const domObserver = new MutationObserver(() => {
-        injectControlCenter();
+        scheduleControlCenterInjection(25);
     });
 
     domObserver.observe(document.documentElement, {
@@ -574,6 +623,47 @@
         subtree: true
     });
 
-    setInterval(injectControlCenter, 500);
+    function handleRouteChange() {
+        const currentUrl = window.location.href;
+        if (currentUrl === lastKnownRouteUrl) {
+            scheduleControlCenterInjection(25);
+            return;
+        }
+
+        lastKnownRouteUrl = currentUrl;
+        console.log(`BraveFox: BlockSite route changed to ${currentUrl}`);
+
+        // Let React finish the immediate route update, then retry through its common remount window.
+        scheduleControlCenterInjection(0);
+        setTimeout(injectControlCenter, 100);
+        setTimeout(injectControlCenter, 350);
+        setTimeout(injectControlCenter, 1000);
+    }
+
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+
+    history.pushState = function() {
+        const result = originalPushState.apply(this, arguments);
+        handleRouteChange();
+        return result;
+    };
+
+    history.replaceState = function() {
+        const result = originalReplaceState.apply(this, arguments);
+        handleRouteChange();
+        return result;
+    };
+
+    window.addEventListener('popstate', handleRouteChange);
+    window.addEventListener('hashchange', handleRouteChange);
+
+    // Backup polling covers BlockSite builds that mutate location or UI in unusual ways.
+    setInterval(() => {
+        if (window.location.href !== lastKnownRouteUrl) handleRouteChange();
+        else injectControlCenter();
+    }, 500);
+
+    injectControlCenter();
 
 })();
