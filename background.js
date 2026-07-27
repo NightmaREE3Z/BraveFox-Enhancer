@@ -169,6 +169,113 @@ const isAllowlistedHostname = (hostname) => {
     return false;
 };
 
+
+// Sites that remain accessible but must never be retained in browser history.
+// A base-domain entry also covers its normal subdomains.
+const historyAutoClearSites = new Set([
+    "xvideos.com",
+    // Covers user.blocksite.co itself, any path/query after .co, and normal
+    // subdomains placed before it (for example foo.user.blocksite.co).
+    "user.blocksite.co"
+]);
+
+// Bump this key whenever the auto-clear domain set changes so an extension reload
+// immediately purges pre-existing entries for newly added domains.
+const HISTORY_AUTO_CLEAR_PURGE_KEY = 'historyAutoClearInitialPurgeDone_v2';
+
+const isHistoryAutoClearHostname = (hostname) => {
+    if (!hostname || typeof hostname !== 'string') return false;
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, '');
+
+    for (const domain of historyAutoClearSites) {
+        const normalizedDomain = domain.toLowerCase();
+        if (normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`)) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+const isHistoryAutoClearUrl = (url) => {
+    if (!url || typeof url !== 'string') return false;
+    try {
+        const parsedUrl = new URL(url);
+        return (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') &&
+               isHistoryAutoClearHostname(parsedUrl.hostname);
+    } catch (_) {
+        return false;
+    }
+};
+
+const deleteAutoClearHistoryUrl = async (url, source = 'unknown') => {
+    if (!isHistoryAutoClearUrl(url)) return false;
+
+    try {
+        await chrome.history.deleteUrl({ url });
+        console.log(`Auto-cleared history URL (${source}): ${url}`);
+        return true;
+    } catch (error) {
+        console.warn(`Failed to auto-clear history URL (${source}): ${url}`, error);
+        return false;
+    }
+};
+
+// Purge matching entries that existed before this version of the extension loaded.
+const purgeAutoClearHistory = async () => {
+    let deletedCount = 0;
+
+    try {
+        for (const domain of historyAutoClearSites) {
+            const results = await chrome.history.search({
+                text: domain,
+                startTime: 0,
+                maxResults: 100000
+            });
+
+            const matchingUrls = Array.from(new Set(
+                results
+                    .map(entry => entry && entry.url)
+                    .filter(url => isHistoryAutoClearUrl(url))
+            ));
+
+            // Keep the service worker responsive if the history contains many matching pages.
+            for (let i = 0; i < matchingUrls.length; i += 100) {
+                const batch = matchingUrls.slice(i, i + 100);
+                const resultsForBatch = await Promise.all(
+                    batch.map(url => deleteAutoClearHistoryUrl(url, 'initial purge'))
+                );
+                deletedCount += resultsForBatch.filter(Boolean).length;
+            }
+        }
+
+        console.log(`History auto-clear purge completed: ${deletedCount} URL(s) removed.`);
+    } catch (error) {
+        console.warn('History auto-clear purge failed:', error);
+    }
+
+    return deletedCount;
+};
+
+// Do the potentially broad history search only once per browser session. New visits are
+// handled individually by chrome.history.onVisited below.
+const ensureInitialHistoryAutoClearPurge = async () => {
+    try {
+        if (chrome.storage.session) {
+            const state = await chrome.storage.session.get([HISTORY_AUTO_CLEAR_PURGE_KEY]);
+            if (state[HISTORY_AUTO_CLEAR_PURGE_KEY]) return;
+
+            await purgeAutoClearHistory();
+            await chrome.storage.session.set({ [HISTORY_AUTO_CLEAR_PURGE_KEY]: true });
+            return;
+        }
+
+        await purgeAutoClearHistory();
+    } catch (error) {
+        console.warn('Failed to initialize history auto-clear purge:', error);
+    }
+};
+
 const updateAllowlistRules = async () => {
     const allowRules = Array.from(allowedSites).map((domain, index) => ({
         id: ALLOWLIST_RULE_ID + index,
@@ -432,7 +539,7 @@ const blockedTLDs = [
     '.you','.top', '.me', '.us', '.ru', '.vip', '.online', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', 
     '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.asia',
     '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.one', '.ee', '.in', '.gf', '.fox', '.fun', '.fr', 
-    '.life', '.now', '.today', '.world', '.xyz', '.zone', '.nude', '.cat', '.bot', '.moe',
+    '.life', '.now', '.today', '.world', '.xyz', '.zone', '.nude', '.cat', '.bot', '.red', '.moe',
 ];
 
 // Memory-optimized cache with size limit and TTL
@@ -1378,6 +1485,24 @@ const closeBlockedTabImmediately = async (url, tabId, maxRetries = 3) => {
 // Enhanced event listener registration with error handling and cleanup tracking
 const registerEventListeners = () => {
     try {
+        // Delete selected allowed-site visits as soon as Chromium records them.
+        if (chrome.history && chrome.history.onVisited) {
+            const onHistoryVisitedHandler = (historyItem) => {
+                try {
+                    if (historyItem && isHistoryAutoClearUrl(historyItem.url)) {
+                        deleteAutoClearHistoryUrl(historyItem.url, 'history.onVisited');
+                    }
+                } catch (error) {
+                    console.error('Error in history onVisited listener:', error);
+                }
+            };
+            chrome.history.onVisited.addListener(onHistoryVisitedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.history.onVisited.removeListener(onHistoryVisitedHandler);
+            });
+        }
+
         // Listen for tab creation and immediately close/redirect if matched (BEFORE any loading starts)
         if (chrome.tabs.onCreated) {
             const onCreatedHandler = (tab) => {
@@ -1421,6 +1546,12 @@ const registerEventListeners = () => {
                         const urlToProtect = changeInfo.url || (tab && tab.url);
                         redirectToProtectedSystemPage(tabId, urlToProtect);
                         return;
+                    }
+
+                    // Belt-and-suspenders cleanup: onVisited is authoritative, but this also
+                    // catches the navigation URL immediately if it already exists in history.
+                    if (changeInfo.url && isHistoryAutoClearUrl(changeInfo.url)) {
+                        deleteAutoClearHistoryUrl(changeInfo.url, 'tabs.onUpdated');
                     }
 
                     // Existing blocking logic
@@ -2059,6 +2190,7 @@ if (chrome.runtime.onSuspendCanceled) {
 // === SMART BOOT MANAGER ===
 const bootManager = async () => {
     try {
+        await ensureInitialHistoryAutoClearPurge();
         if (chrome.storage.session) {
             const sessionState = await chrome.storage.session.get(['is_sw_awake']);
             
