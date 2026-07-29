@@ -1,32 +1,331 @@
 // ==UserScript==
 // @name         Content hiding and filtering
-// @version      2026-07-27
+// @version      2026-07-29
 // @description  Filter out stuff on the internet (Targeted Enforcer)
-// @match        *://*/* 
+// @match        *://xvideos.com/*
+// @match        *://*.xvideos.com/*
+// @match        *://tenor.com/*
+// @match        *://*.tenor.com/*
 // @grant        none
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    // === TARGET SITES FOR **FILTERING/HIDING** CONTENT ===
-    // This extension/js file does NOT encourage or otherwise facilitate the use or access to adult content sites in under any circumstance. The only purpose of this function/file is to filter out certain types of content from XVideos for my own use case, such as AI-generated stuff. Furthermore, this extension is meant for PERSONAL USE ONLY. It is only set to "Unlisted" so I can install it from direct link when needed. I'd honestly prefer that it would not be shown in any type of searches at all, if that's doable. 
-    const targetDomains = ['xvideos.com'];
-    const currentHost = window.location.hostname.toLowerCase().replace(/\.$/, '');
-    const isTargetDomain = targetDomains.some(domain =>
-        currentHost === domain || currentHost.endsWith(`.${domain}`)
-    );
-    
-    if (!isTargetDomain) {
-        return; // Script goes completely dormant on normal websites like Outlook.
+
+    // === SITE ROUTING ===
+    // filtering.js has two deliberately isolated jobs:
+    //   1) full XVideos filtering; and
+    //   2) a tiny Tenor search-submit guard.
+    // It must remain completely dormant everywhere else, even when an extension manifest from an
+    // older build still injects the file broadly.
+    const BRAVEFOX_FILTERING_HOST = String(window.location.hostname || '')
+        .toLowerCase()
+        .replace(/\.$/, '');
+    const BRAVEFOX_IS_XVIDEOS = BRAVEFOX_FILTERING_HOST === 'xvideos.com' ||
+        BRAVEFOX_FILTERING_HOST.endsWith('.xvideos.com');
+    const BRAVEFOX_IS_TENOR = BRAVEFOX_FILTERING_HOST === 'tenor.com' ||
+        BRAVEFOX_FILTERING_HOST.endsWith('.tenor.com');
+
+    if (!BRAVEFOX_IS_XVIDEOS && !BRAVEFOX_IS_TENOR) return;
+
+    // One authoritative static filter list shared by XVideos and Tenor.
+    // Keep every entry as an ordinary regex literal for direct auditing and editing.
+    function createStaticBlockedRegexWords() {
+        return [
+        /deepn/i, /deepf/i, /deeps/i, /udif/i, /nudif/i, /ndres/i, /alexa/i, /poshspi(?:c|s)y/i, /face[\s_-]*swap/i, /swap[\s_-]*face/i, /Brie/i, /face[\s_-]*morph/i, 
+	/morph[\s_-]*face/i, /dream[\s_-]*booth/i, /wondershare/i, /filmora/i, /app/i, /Liv[\s_-]+Morgan/i, /Liv[\s_-]+Xoxo/i, /Morgan[\s_-]+Xoxo/i, /Sweeney/i, /Sydne/i, 
+	/Steward/i, /Stewart/i, /Kristen/i, /Kriis/i, /Bella/i, /Nikki/i, /Chyna/i, /China/i, /Hulk/i, /lex[\s_-]*bl/i, /leks[\s_-]*bl/i, /Lexi/i, /Hogan/i, /Tiffy/i, 
+	/Bliss/i, /Marg[\s_-]+Robb/i, /Margo/i, /Robbie/i, /Elyna/i, /Elyina/i, /Eliyna/i, /Eliyina/i, /Dua[\s_-]*Lipa/i, /Kamitani/i, /Katie/i, /Nikkita/i, /Alicy/i,
+	/Lisa[\s_-]+Marie/i, /Lisa[\s_-]+Varon/i, /Marie[\s_-]+Varon/i, /Takaichi/i, /Sakurai/i, /Arrivederci/i, /Alice/i, /Alici/i, /Arisu[\s_-]+Endo/i, /Crowley/i, 
+	/Ruby[\s_-]+Soho/i, /Castillo/i, /Monica/i, /Matsumoto/i, /Shino[\s_-]+Suzuki/i, /Lily[\s_-]+Adam/i, /Lana/i, /Blake/i, /Bailey/i, /Bayley/i, /Naomi/i, /Ruca/i, 
+	/Irving/i, /Monroe/i, /Del[\s_-]+Rey/i, /McMahon/i, /CJ[\s_-]+Perry/i, /Stratton/i, /Lola[\s_-]+Vice/i, /shirakawa/i, /Belts[\s_-]+Mone/i, /gay/i, /pride/i, 
+	/Amanda[\s_-]+Huber/i, /Joanie[\s_-]+Laurer/i, /AEW/i, /TNA/i, /WWE/i, /NJPW/i, /LGBT/i, /Trans/i, /playboy/i, /anorexic/i, /Arab/i, /Stee/i, /Sweee/i, /Waaa/i,
+	/deviant[\s_-]*art/i, /r[\s_-]*34/i, /Stee/i, /Sweee/i, /Sol/i, /Transsexual/i, /Femdom/i, /Animat/i, /AI Porn/i, /AI Nude/i, /AI Pussy/i, /AI Anal/i, /AI Sex/i, 
+	/guy-guy/i, /homo/i, /grandpa/i, /grandma/i, /aunty/i, /piss/i, /pee/i, /crap/i, /shit/i, /fece/i, /Cuckold/i, /Bikini/i, /Lingerie/i, /Hentai/i, /Animation/i, 
+	/Artific/i, /Intel/i, /male-/i, /africa/i, /japan/i, /china/i, /chine/i, /twerk/i, /strip/i, /whori/i, /muscular/i, /-male/i, /male-/i, /shemale/i, /shemale/i, 
+	/old-young/i, /young-old/i, /old-vs-young/i, /Nude AI/i, /nudi AI/i, /software/i, /undre AI/i, /Nud3/i, /Nud1/i, /Naked AI/i, /-AI/i, /AI-/i, /-AI-/i, /AI App/i, 
+	/-App/i, /App-/i, /Appli/i, /-IA/i, /IA-/i, /-IA-/i,
+
+
+        // Symbols and standalone abbreviations
+        /\*/i, /#/i, /(^|[^a-z0-9])AI([^a-z0-9]|$)/i,
+
+
+        // Boundaried Regex blocklist
+        /\bMLM\b/i, /\bLLM\b/i, /\bAI\b/i, /\bAsia\b/i, /\bAsian\b/i, /\bMale\b/i, /\bOld\b/i, /\bIA\b/i,
+
+
+        // Blocksite consistency list (every term from blocksite list)
+        /epnu/i, /epno/i, /epeno/i, /ndres/i, /udif/i, /derrier/i, /derriere/i, /undress/i, /del clot/i, /eras clot/i, /eras pant/i, /del pant/i, /lex bl/i, /lex kauf/i,
+        /lex cabr/i, /lex carb/i, /Liv Morgan/i, /Giona Jene/i, /Gionna Daddio/i, /Jene Daddio/i, /Zeli Vega/i, /Nikki/i, /remov pant/i, /remov cloth/i, /shak ass/i, 
+	/shak booty/i, /shak butt/i, /AI cloth/i, /AI pant/i, /AI linger/i, /linqerie/i, /Zelina/i, /Zel Vega WWE/i, /removal of cloth/i, /remov of cloth/i, /0ffr0b/i,  
+	/eras of cloth/i, /Sydney Sweeney/i, /Zel Veg WWE/i, /swapface/i, /Fanene/i, /faceswap/i, /face swap/i, /morphface/i, /morph face/i, /facemorph/i, /face morph/i, 
+	/faceblend/i, /face blend/i, /Zel Vag WWE/i, /swap face/i, /switch faces/i, /switchfaces/i, /faceswitch/i, /face switch/i, /offrobe/i, /0ffrob/i, /offr0b/i,  
+	/painttonud/i, /paint2nud/i, /paint to nud/i, /paint 2 nud/i, /p4int/i, /pa1nt/i, /uncloth/i, /un cloth/i, /derobe/i, /de robe/i, /un-cloth/i, /delet of cloth/i,
+        /de-robe/i, /disrobe/i, /dis-robe/i, /clothoff/i, /cloth off/i, /cloth-off/i, /Unpant/i, /b1kin/i, /bik1n/i, /trunks/i, /trunk5/i, /unblur/i, /enhanc/i, /upscale/i,
+        /enhanceunblur/i, /photoenhance AI/i, /AI enhancing/i, /Enhancing AI/i, /AI photoenhance/i, /AI-photoenhance/i, /photoenhance-AI/i, /AI unblur and enhance/i, 
+	/AI unblur and upscale/i, /rule 34/i, /rulethirtyfour/i, /rule thirtyfour/i, /Explicit AI content/i, /gr4phy/i, /p0rno/i, /porn0/i, /deepfake/i, /deep fake/i, 
+	/object remov/i, /remov object/i, /delet object/i, /object delet/i, /eras object/i, /object eras/i, /unblur/i, /un blur/i, /deblur/i, /de blur/i, /remov blur/i, 
+	/rem0v/i, /r3mov/i, /d3let/i, /del3t/i, /3rasi/i, /er4si/i, /eras1/i, /Reveal AI/i, /AI Reveal/i, /uncensor AI/i, /AI uncensor/i, /unc3nsor/i, /uncen5or/i, 
+	/uncens0r/i, /unc3n50r/i, /uncen50r/i, /unc3ns0r/i, /Artific uncensor/i, /Uncensor artific/i, /d3epnu/i, /de3pnu/i, /d33pnu/i, /ndr3ss/i, /ndre5s/i, /ndres5/i, 
+	/ndre55/i, /ndr3s5/i, /ndr35s/i, /aifake/i, /iafake/i, /ai fake/i, /ia fake/i, /Denois/i, /De nois/i, /de-nois/i, /dr3ss/i, /dre5s/i, /dres5/i, /celebjihad/i, 
+	/celeb-jihad/i, /celebsunmasked/i, /unmaskedcelebs/i, /celebrityfakes4u/i, /celebrityfakesforyou/i, /celebrityfakes2you/i, /celebrityfakestoyou/i, /outfitswap/i, 
+	/swapoutfit/i, /outfit-swap/i, /swap-outfit/i, /aznude/i, /az_nude/i, /az-nude/i, /Fapello/i, /Daddio/i, /Gionna/i, /Giona/i, /Gion4/i, /G1ona/i, /Brianna Garcia/i, 
+	/gi0na/i, /Brie Garcia/i, /Nikki Garcia/i, /Bella Twin/i, /Samantha/i, /S4mantha/i, /sam4ntha/i, /s4m4ntha/i, /s4m4nth4/i, /sam4nth4/i, /s4manth4/i, /Irvin wrest/i, 
+	/Irvin rass/i, /Irvin WWE/i, /Irvin AEW/i, /Irvin TNA/i, /Irvin NJPW/i, /Irwin wrest/i, /Irwin rass/i, /Irwin WWE/i, /Irwin AEW/i, /Irwin TNA/i, /Irwin NJPW/i, 
+	/D4ddio/i, /dadd1o/i, /daddi0/i, /d4dd1o/i, /d4ddi0/i, /dadd10/i, /Sanna Marin sex/i, /Sanna Marin anal/i, /fappenist/i, /fappening/i, /nude leak/i, /naked leak/i, 
+	/bare leak/i, /cunt leak/i, /pussy image leak/i, /pussy photo leak/i, /pussy pic leak/i, /celeb leak/i, /porn leak/i, /onlyfans leak/i, /fantime leak/i, /Nood/i,
+	/JustForFans leak/i, /FanCentro leak/i, /MYM leak/i, /Unfiltrd leak/i, /Loyalfans leak/i, /Ismygirl leak/i, /Friendsonly leak/i, /Modelhub leak/i, /myFanPark leak/i, 
+	/iFans leak/i, /Fanso leak/i, /Mygirlfund leak/i, /AdultNode leak/i, /Uncensored leak/i, /Unfiltered leak/i, /Fanvue leak/i, /Okfans leak/i, /Manyvids leak/i, 
+	/Scrile connect leak/i, /Flirtback leak/i, /Scrile content leak/i, /picwish/i, /snapedit/i, /Carbrera/i, /undiewear/i, /und1es/i, /undi3s/i, /undie5/i, /und13s/i, 
+	/und1e5/i, /undi35/i, /swimwear/i, /sw1mw/i, /5wimw/i, /sw1mwe4r/i, /sw1mw34r/i, /remov underwear/i, /remov undie/i, /remov boxers/i, /delet underwear/i, /poses/i,
+	/Fansly leak/i, /delet bikini/i, /eras swimwear/i, /remov swimwear/i, /delet swimwear/i, /remov suit/i, /delet suit/i, /eras suit/i, /remov bra/i, /delet bra/i, 
+	/delet pant/i, /delet boxers/i, /delet undie/i, /delet cloth/i, /eras cloth/i, /based labs/i, /basedlabs/i, /Glutes/i, /Coarse vid/i, /Coarse pic/i, /c0arse/i, 
+	/co4rse/i, /coar5e/i, /coars3/i, /noodi/i, /b1kin1/i, /b!kin1/i, /b1kin!/i, /b!kin!/i, /Bella fantas/i, /St3phan/i, /st3ph4n/i, /steph4n/i, /Steph Nicole/i, 
+	/Chigvintsev/i, /Immodest/i, /Nethers/i, /Nether regions/i, /posing/i, /p0s1ng/i, /p05ing/i, /WWE onlyfans/i, /AEW onlyfans/i, /NJPW onlyfans/i, /TNA onlyfans/i, 
+	/smexy/i, /sm3xy/i, /Bella/i, /Point 0f View/i, /b0oty/i, /bo0ty/i, /Lady Part/i, /Femal part/i, /Girl part/i, /Genital/i, /Fannie/i, /Fannys/i, /skimp/i, /sk1mp/i, 
+	/5kimp/i, /generativ/i, /gener AI/i, /ejaculat/i,/5quirt/i, /squ1rt/i, /squir7/i, /squ1r7/i, /5quir7/i, /5qu1rt/i, /Mercedes Mon/i, /Sasha/i, /B4nks/i, /NJPW tush/i, 
+	/AEW tush/i, /TNA tush/i, /WWE tush/i, /NJPW vulva/i, /AEW vulva/i, /TNA vulva/i, /WWE vulva/i, /mak1n out/i, /m4kin out/i, /m4k1n out/i, /makin 0ut/i, /mak1n 0ut/i, 
+	/m4kin 0ut/i, /m4k1n 0ut/i, /Nikk Bell/i, /Niki Bell/i, /Zelin Veg/i, /d3epn/i, /de3pn/i, /Nude_AI/i, /noowd/i, /deee/i, /deppp/i, /pus5y/i, /pu5sy/i, /Nude-AI/i, 
+	/nuuw/i, /NudeAI/i, /A1 Nud3/i, /AI Nud3/i, /A1 Nude/i, /mak3 nude/i, /mak3 nud3/i, /make nude/i, /mak nud/i, /deppnude/i, /depp-nude/i, /depp nude/i, /depp\+nude/i, 
+	/nud1f/i, /deepp/i, /deepe nude/i, /d33p3 nud3/i, /deep3 nud3/i, /deep3 n00d/i, /deep3 n00/i, /deepe no0/i, /deepe n0/i, /deep e n0o/i, /deep e n00/i, /deep e noo/i, 
+	/deepe n0o/i, /deepe n00d/i, /foxify/i, /deepen 00/i, /d33pen0/i, /d3epen0/i, /de3pen0/i, /peee/i, /deepeen/i, /deepen oo/i, /deepenoo/i, /deepe noo/i, /make nud3/i, 
+	/mak1n/i, /gen nud3/i, /bas3dlabs/i, /AI Gen nud/i, /AI Gen n0/i, /g3n nude/i, /generat_nud/i, /generatenud/i, /genratenud/i, /genratnud/i, /d33pe nude/i, /undre55/i, 
+	/undre/i, /AI Nud/i, /de3pno/i, /d33pno/i, /deepn0/i, /de3pn0/i, /deepnu/i, /deep-nud/i, /d33pn0d/i, /depnud/i, /pusss/i, /pussie/i, /pussiie/i, /pussiii/i, /d3pnud/i, 
+	/deep-n/i, /deep\+n/i, /deep_nud/i, /deep_n0/i, /deep nud/i, /deepnudo/i, /nuds/i, /n8ked/i, /nak3d/i, /n4ked/i, /deep3/i, /deep-nu/i, /d33p-nu/i, /deep nu/i, /diii/i, 
+	/dipnud/i, /dllp-n/i, /dllp_n/i, /dllp n/i, /dllpn/i, /diip n/i, /diip\.n/i, /d1pnud/i, /dip nud/i, /dip-nud/i, /dip_nud/i, /unstabl diffu/i, /diipn/i, /unst4bl d1ffu/i, 
+	/deep_n/i, /AI Noo/i, /deepe n00/i, /unst4ble/i, /unst4bl3/i, /unstabl3/i, /pqrn/i, /pårn/i, /pxrn/i, /p0rni/i, /porni/i, /porny/i, /swap pant/i, /fox1fy/i, /fox1f/i,
+	/foxif/i, /f0xif/i, /removecloth/i, /remove cloth/i, /generatenude/i, /un5tabl/i, /generate nude/i, /generate nud3/i, /change pant AI/i, /photo ai/i, /imag ai/i,  
+	/nsfw=tool/i, /nsfw/i, /nsfw-tool/i, /stablediffusion/i, /stabl diffus/i, /stable-diffusion/i, /stable_diffusion/i, /stable\?diffusion/i, /stable=diffusion/i, /nuk3if/i,
+	/st4bl3/i, /stabl diffu/i, /st4bl diffu/i, /5t4bl diffu/i, /d1ffu/i, /unstable-diffusion/i, /un5t4bl/i, /unst4bl/i, /undr/i, /onlyf4ns/i, /onlyf4n5/i, /onlif4n5/i, 
+	/mak1n/i, /IMG ai/i, /st4ble/i, /onlif4ns/i, /f4nt1me/i, /fant1me/i, /f4ntime/i, /manyvids/i, /m4nyvids/i, /manyv1ds/i, /manyvid5/i, /m4nyv1d5/i, /f4n5ly/i, /fan5ly/i,
+	/f4nsly/i, /0nlynsfw/i, /onlynsfw/i, /deepai/i, /deep-ai/i, /deep\+ai/i, /deep\?ai/i, /deep=ai/i, /deep_ai/i, /gen nude/i, /nude gen/i, /genaratenud/i, /gen_nude/i, 
+	/generate_nud/i, /g3nerate_nud/i, /g3n3rat/i, /nudgen/i, /nudegen/i, /nudesgen/i, /nudes gen/i, /nde gen/i, /nude gn/i, /nde gn/i, /creat girlf/i, /creat gf/i, /creategf/i, 
+	/mak gf/i, /mak girlf/i, /Girlfriend AI/i, /nudgener/i, /nudi gen/i, /gen3raten/i, /gen3rat3n/i, /live3d/i, /aiexotic/i, /ai exotic/i, /ai-exotic/i, /nsfwart/i, /nsfw art/i, 
+	/nsfw art gen/i, /ero Artificial intelligence/i, /Artificial intelligence gen/i, /babe5/i, /Artificial intelligence g3n/i, /generat3/i, /genrat/i, /nude5/i, /waif/i, /cr34te/i, 
+	/cr3ate/i, /cr3a7e/i, /cr3at/i, /creat1/i, /Artificial intelligence porn/i, /creat3/i, /Artificial intelligence ero/i, /bebe5/i, /nubee/i, /nub3e/i, /nube3/i, /pxxrn/i, /pxxxrn/i, 
+	/poorn/i, /penetr\*\*e/i, /Lex Bliss/i, /createporn/i, /vidnoz/i, /creat porn/i, /porn journey/i, /bussy/i, /pornjourney/i, /frosting ai/i, /fr0st ai/i, /fr0st a1/i, /pornjoy/i, 
+	/porn joy/i, /pornj0y/i, /porn j0y/i, /only-babe/i, /onlybabe/i, /ai p0rn/i, /ai corn/i, /priv3/i, /aip0rn/i, /bus5y/i, /bu5sy/i, /privee/i, /prive/i, /r3m0ve/i, /remov3/i, 
+	/r3m AI/i, /rem cloth/i, /cloth rem/i, /pant rem/i, /rem pant/i, /pant eras/i, /pant del/i, /frosting\?ai/i, /frosting=ai/i, /frosting-ai/i, /ai onl/i, /porm/i, /un pant/i, 
+	/de pant/i, /depant/i, /remdress/i, /rem dress/i, /dress rem/i, /dressrem/i, /rem bra/i, /rem boxers/i, /deldress/i, /de dress/i, /dress de/i, /dressde/i, /del bik/i, /rem bik/i, 
+	/eras bik/i, /dress eras/i, /clit\*/i, /clito\*/i, /\*litor\*/i, /\*litori/i, /clitori\*/i, /clitor\*/i, /pl3as/i, /pl345sure/i, /g3nit/i, /ai tush/i, /L3X Bliss/i, /Bl1ss/i, 
+	/L3X Bl1ss/i, /pl345ur3/i, /vulv\*/i, /\*ulva/i, /Mercede Bank/i, /pl345ure/i, /m\*stu/i, /mas\*u/i, /mast\*r/i, /vag\*\*a/i, /Artific Intellig/i, /v\*\*ina/i, /\*agina/i, 
+	/vagin\*/i, /vagi\*n/i, /puss\*/i, /puss3/i, /pussee/i, /pu5si/i, /puss1/i, /squ1r/i, /s\*uir/i, /squir\*/i, /\*quir/i, /squ\*r/i, /squi\*/i, /sq\*ir/i, /5quir\*/i, /eras photo/i, 
+	/eras pic/i, /midjourney/i, /mid journey/i, /prompthero/i, /prompt hero/i, /midjourn3y/i, /creat nud/i, /gen nud/i, /convert nud/i, /conversion nud/i, /nud someone/i, /cr3at nud/i,
+	/nud some else pic/i, /nud someone pic/i, /AI suit/i, /nud person p/i, /nud people p/i, /nud person i/i, /nak convert/i, /nak conversion/i, /nud someone i/i, /nud some else i/i, 
+	/nud someone p/i, /cre\*te/i, /cre4t nud/i, /crea7 nud/i, /cr347 nud/i, /nud app/i, /m\*k nud/i, /\*ak nud/i, /m4k nud/i, /m&k3 nud/i, /m&ke nud/i, /c\*eate/i, /cr\*ate/i, 
+	/crea\*e/i, /creat\*/i, /\*reat/i, /crete nud/i, /cret3 nud/i, /Nudi it/i, /Nude it/i, /###/i, /nud softw/i, /nud softv/i, /nud softf/i, /nud her p/i, /nud the/i, /nud people/i, 
+	/nud person/i, /nudein/i, /nudin/i, /nudey/i, /nudy/i, /nudyin/i, /nudeyi/i, /\*ying/i, /creat nak/i, /nud!f/i, /nude!f/i, /doepnud/i, /nuid1/i, /nuidi/i, /nuid/i, /nudl/i, /njuud/i,
+        /njud/i, /nujd/i, /nudj/i, /nuidif/i, /nui!d/i, /diepn/i, /deip/i, /diif/i, /deopnud/i, /nidif/i, /n1dif/i, /nid1f/i, /expli\*it/i, /explic\*t/i, /explici\*/i, /\*xplicit/i,
+	/e\*plicit/i, /ex\*licit/i, /exp\*icit/i, /expl\*cit/i, /exp!ic/i, /expl!c/i, /3xpl!c/i, /expl1c/i, /horni/i, /horn1/i, /h0rny/i, /whor1/i, /wh0re/i, /whor3/i, /dirti/i, /dirt\*/i,  
+	/d1rti/i, /conv3rt/i, /conv3rs/i, /c0nver/i, /d1rtl/i, /dlrt1/i, /dlrt!/i, /dlrti/i, /dlrty/i, /d!rti/i, /dir\*i/i, /dir\*y/i, /who\*ing/i, /deepmok/i, /nuk1f/i, /nuk3f/i,  
+	/deepnugif/i, /deepnukeif/i, /deepnugeif/i, /deepn00/i, /deepnoo/i, /diep/i, /nudi app/i, /nude app/i, /ned1f/i, /nedif/i, /nedeif/i, /nudeif/i, /nootify/i, /ned!f/i, /diva vulva/i,
+	/artificial intelligence/i, /art intel/i, /ai booty/i, /ai butt/i, /ai horny/i, /diva vag/i, /diva pussy/i, /diva naked/i, /diva nude/i, /diva anal/i, /diva horny/i, /diva the butt/i, 
+	/AI explicit/i, /AI explic/i, /Art explic/i, /A1 explic/i, /al explic/i, /al lntel/i, /cl0at/i, /elliecha0tic/i, /AI sensu/i, /off cloth/i, /off robe/i, /Off dress/i, /Off pant/i, 
+	/off bra/i, /off swimwear/i, /off lingerie/i, /off boxers/i, /off swimsuit/i, /AI Uncens/i, /Al uncens/i, /A1 uncens/i, /IA nude/i, /AI censor/i, /A\* censor/i, /Al censor/i, 
+	/A1 censor/i, /Al unfilt/i, /A1 unflit/i, /AI unfilt/i, /unf1lt/i, /unfllt/i, /unf!lt/i, /\*l tool/i, /\*I tool/i, /A\* tool/i, /IA nud/i, /cloth chan web/i, /cloth chan app/i, 
+	/cloth chan sit/i, /cloth chan im/i, /cloth chan ph/i, /cloth chan si/i, /pant chan si/i, /pant chan im/i, /shirt chan pic/i, /shirt chan ph/i, /sh1rt/i, /shirt chan im/i,
+	/cloth chan pic/i, /outf chan ap/i, /chng/i, /facechan/i, /cust ai/i, /facl/i, /facechang/i, /face chan/i, /khangin/i, /khange/i, /kh4ng/i, /changr/i, /khang1/i, /khang3/i,
+        /khang/i, /thr0at/i, /thro4t/i, /sw1tch/i, /face swi/i, /outf chan im/i, /dress chan ap/i, /shirt chan ap/i, /biur/i, /nude scan/i, /AI blur/i, /khank/i, /khanc/i, /ghang/i,
+        /dres chan/i, /dres switch/i, /AI dres/i, /nub1f/i, /nubif/i, /nuuu/i, /noudi/i, /nuod/i, /noudl/i, /noud1/i, /noud3/i, /deepnoud/i, /deepnou/i, /deepnu0/i, /ch4ng/i, /dlidn/i,
+	/nuubif/i, /nuub3f/i, /nodress/i, /ndress/i, /nub app/i, /nub site/i, /nuub app/i, /nuub site/i, /deeper nud/i, /deepernud/i, /deepern0o/i, /deeperno0/i, /no dress/i, /diip/i,
+	/unstress/i, /n0 tre/i, /n0tre/i, /no tress/i, /untres/i, /ntress/i, /notress/i, /nodif/i, /nod1f/i, /ndif/i, /ndlf/i, /doodlf/i, /dood!f/i, /doodif/i, /dood1f/i, /diid/i,  
+	/deepi/i, /sma5h/i, /sm4sh/i, /deep dud si/i, /deep dud ap/i, /deeperno/i, /neepdud/i, /neep dud/i, /dudeif/i, /udelf/i, /dudief/i, /udeif/i, /ude1f/i, /ude!f/i, /dlid n/i,  
+	/dild/i, /difd/i, /d nudi/i, /d3d nud/i, /deepenu/i, /deepa/i, /deepb/i, /deepd/i, /deep fa/i, /deepfa/i, /deepfx/i, /deepcu/i, /deepcoc/i, /deepdic/i, /deepic/i, /deeppic/i,  
+	/deepf3/i, /deep f4/i, /deepg/i, /deep f3/i, /deepl/i, /deeph/i, /deepj/i, /deepk/i, /deppn/i, /depp nu/i, /deepr/i, /deepq/i, /deepo/i, /deep0/i, /deep n0/i, /deepm/i, /deepw/i,  
+	/deepu/i, /deept/i, /deepx/i, /deepsx/i, /deeps\*x/i, /deepz/i, /deeznud/i, /deez nud/i, /deepy/i, /nutif/i, /ntif/i, /nutlf/i, /nut!f/i, /nuteif/i, /nopif/i, /nop1f/i, /nopeif/i,  
+	/inpa1nt/i, /inp4int/i, /inp41nt/i, /inpa!nt/i, /inpalnt/i, /llng/i, /AI outf/i, /AI wear/i, /cl0ath/i, /outf!t/i, /outf1t/i, /AI shir/i, /cI0uth/i, /c!0uth/i, /c10uth/i, /cl0uth/i, 
+	/c1outh/i, /c!outh/i, /cIouth/i, /c1oth/i, /c!oth/i, /diva the ass/i, /cl0th/i, /cl04th/i, /clo4th/i, /cl0yth/i, /cloyth/i, /w1thout/i, /with0ut/i, /wlth/i, /shlrt/i, /sh!rt/i, /5kirt/i, 
+	/5klrt/i, /dudif/i, /dud1f/i, /dud!f/i, /deep som/i, /deepsum/i, /deep sum/i, /deep sud/i, /deep gud/i, /deep cod/i, /nqde/i, /nxde/i, /tutif/i, /tut1f/i, /tut!f/i, /duudi/i, /d0dif/i, 
+        /n0dress/i, /dod1f/i, /deepfu/i, /deepfo/i, /deepf0/i, /deep fud/i, /AI editor/i, /3ditor/i, /3d1tor/i, /undressaitool/i, /undressaitools/i, /dexp/i, /nxxe/i, /nuxe/i, /nudx/i, /deepxu/i,  
+	/fudeif/i, /deep xu/i, /xudl/i, /qudl/i, /qud!f/i, /qude!f/i, /deep qud/i, /ai dress/i, /ai edit vid/i, /ai softw/i, /nudeifi/i, /zudeif/i, /zudif/i, /deep zu/i, /deep zode/i, /zodlf/i,  
+	/zode/i, /zodei/i, /zude/i, /zud1f/i, /zud!f/i, /budif/i, /budeif/i, /deep bude/i, /deep budi/i, /deebn/i, /deeb/i, /debbn/i, /debn/i, /noudif/i, /nuodif/i, /debb/i, /nuodef/i, /noudef/i,  
+	/bud!f/i, /budlf/i, /budelf/i, /deep ud/i, /deepud/i, /deep kud/i, /deep xud/i, /deep dudi/i, /deep fui/i, /deep ful/i, /deep fuo/i, /deep fyu/i, /deepfy/i, /deepfiy/i, /deepfiu/i, /deepfe/i,
+	/deep fi/i, /deep fou/i, /deep fuy/i, /fodif/i, /fod1f/i, /fod!f/i, /deep cu/i, /deep codi/i, /deep cud/i, /cudeif/i, /cudif/i, /deep foud/i, /deep fuod/i, /deepcod/i, /deepny/i, /deep ny/i, 
+	/neep dy/i, /deep noy/i, /noydif/i, /nyodif/i, /nuydif/i, /nyudif/i, /gen1r/i, /off skirt/i, /off skir/i, /bude1f/i, /dodif/i, /without skirt/i, /with out skirt/i, /5quir/i, /plea5/i, /gen1t/i, 
+	/deep fuid/i, /deep fod/i, /bude!lf/i, /nudief/i, /leak nude/i, /deepsom/i, /cloath/i, /skrt/i, /outflt/i, /promp nud/i, /nude people i/i, /nud some else p/i, /nud her i/i, /nud!n/i, /nud!ng/i, 
+	/niidif/i, /3xpl1c/i, /c0nv3r/i, /deepnukif/i, /nut1f/i, /ntlf/i, /deepf4/i, /Art !ntel/i, /pant chan ph/i, /outf chan si/i, /thr04t/i, /depdud/i, /ghanc/i, /deepnuo/i, /n0dif/i, /deepe nu/i, 
+	/deepdud/i, /Art explicit/i, /Xia Brookside/i, /Charlot Flai/i, /Ruby Soho/i, /Iyo sky/i, /Iyo Shirai/i, /Io Shirai/i, /dirt1/i, /n0 dress/i, /sklr/i, /clouth/i, /inpaint/i, /deepv/i, /fudif/i, 
+	/zod!f/i,  /un stress/i, /nuub1f/i, /nuod3/i, /deep dudeif/i, /Shirai/i, /rule34/i, /windsor/i, /winds0r/i, /w1nds0r/i, /w1ndsor/i, /Adriana Rizzo/i, /Adriana/i, /Alba Fyre/i, /Kay Lee Ray/i, 
+	/Alicia Taylor/i, /Alicia Warrington/i, /Warrington/i, /Arianna Grace/i, /Bianca Carelli/i, /Kanako Urai/i, /Space Galaxy Warrior Leona/i, /Asuka/i, /B-Fab/i, /Briana Brandy/i, /Davina Rose/i, 
+	/Davina/i, /Bianca Belair/i, /Bianca/i, /Nicole/i, /Brie Bella/i, /Nikki Bella/i, /Nicole Garcia/i, /Brooke Hogan/i, /azm/i, /Melina Nava/i, /Melina Nava Pérez/i, /Melina Pérez/i, /Mariah May/i, 
+	/Blake Monroe/i, /Candice LeRae/i, /Cathy Kelley/i, /Chantel Monroe/i, /Derrian Gobourne/i, /Chelsea Green/i, /Laurel Van Ness/i, /Megan Miller/i, /Fallon Henley/i, /Giulia/i, /Dakota Kai/i,
+	/Emily Andzulis/i, /Izzi Dame/i, /Franki Carissa/i, /Jackie Redmond/i, /Jacy Jayne/i, /Avery Taylor/i, /Jade Cargill/i, /Jaida Parker/i, /Tiana Caffey/i, /jazz/i, /Kairi Sane/i, /Xtina Kay/i,
+	/Jordynne Grace/i, /Tylynn Register/i, /Kairi Hoku/i, /Karmen Petrovic/i, /Monika Klisara/i, /Kelani Jordan/i, /Lea Mitchell/i, /Kendal Grey/i, /Kiana James/i, /Kayla Inlay/i, /Lainey Reid/i, 
+	/Adelicious/i, /Sasha Banks/i, /Mercedes Moné/i, /Alex Gracia/i, /Aleah James/i, /Alicia Atout/i, /Alisha Edwards/i, /naomi/i, /Allysin Kay/i, /Alpha Female/i, /Jazzy Gabert/i, /Amber O'Neal/i, 
+	/Amale Winchester/i, /Angel Hayze/i, /Angelica Risk/i, /Angelina Love/i, /Airica Demia/i, /anna jay/i, /Aria Bennett/i, /Arie Alexander/i, /Arkady Aura/i, /azumi/i, /Blair Davenport/i, /hyan/i, 
+	/Ash By Elegance/i, /Ashley D'Amboise/i, /Bea Priestley/i, /Dana Brooke/i, /Ayako Hamada/i, /Billie Starkz/i, /Lillian Bridget/i, /Jessie Brooks/i, /Ava Storie/i, /Brandi Lauren/i, /Ivy Nile/i,
+	/Camron Branae/i, /Ashley Blaze/i, /Amari Miller/i, /Camron Bra'Nae/i, /Camron Connors/i, /Carlee Bright/i, /Peyton Royce/i, /Cassie Lee/i, /Charlette Renegade/i, /Chigusa Nagayo/i, /Chik Tormenta/i, 
+	/Christina Von Eerie/i, /Christyan Reid/i, /Christi Jaynes/i, /Crystal Carmichael/i, /Dalys la Caribean/i, /Dani Luna/i, /Vanessa Borne/i, /Danielle Kamela/i, /Sonya Deville/i, /Daria Berenato/i, 
+	/Dasha Gonzalez/i, /Dasha Fuentes/i, /Delmi Exo/i, /Deonna Purrazzo/i, /Diamanté/i, /Priscilla Zuniga/i, /Britt Baker/i, /Dream Girl Ellie/i, /Virginia Ferry/i, /Cora Jade/i, /Elayna Black/i, 
+	/Dump Matsumoto/i, /Ella Envy/i, /Dump Matsumoto/i, /Kaoru Matsumoto/i, /Emi Sakura/i, /Emi Motokawa/i, /Donna Rama/i, /Erica Leigh/i, /Estrellita/i, /Faby Apache/i, /Faye Jackson/i, /Lady Flammer/i, 
+	/Big Booty Trudy/i, /Freya the Slaya/i, /Freya the Slayer/i, /Gabby LaSpisa/i, /Gabby Ortiz/i, /Gia Miller/i, /Georgia Lee Ann Milton/i, /Valentina Rossi/i, /Gianna Capri/i, /Adriana Gambino/i, 
+	/Jenny Levy/i, /Gisele Shaw/i, /Harley Cameron/i, /Danni Ellexo/i, /Reyna Reyes/i, /Harley Hudson/i, /Jessicka Havok/i, /Jessica Havok/i, /Jessika Havok/i, /Heather Reckless/i, /Hikaru Shida/i,
+        /holidead/i, /HollyHood Haley/i, /Indi Hartwell/i, /Samantha De Martin/i, /Courtney Stewart/i, /Isla Dawn/i, /Ivelisse/i, /Ivelisse Vélez/i, /Sofia Cortez/i, /Juliette/i, /Jada Stone/i, /Kellyanne/i,
+	/Jade Chung/i, /Jade Gentile/i, /Jazmyn Nyx/i, /Rimi Yokota/i, /Jaguar Yokota/i, /Jamie Hayter/i, /Jessi Kamea/i, /Jessie Elaban/i, /Billie Kay/i, /Jessie McKay/i, /Jessy Ventura/i, /Jessy Queen/i, 
+	/Jody Threat/i, /Julia Hart/i, /Yulisa Leon/i, /Julisa Leon/i, /Julissa Mexa/i, /Yulisa León/i, /Kacy Catanzaro/i, /Kali Armstrong/i, /Destinee Brown/i, /Karen Jarrett/i, /Elektra Lopez/i, 
+	/Karissa Rivera/i, /Kamilla Kaine/i, /kamille/i, /kamille/i, /Summer Sorrell/i, /Katie Forbes/i, /Khloe Hurtz/i, /Kayla Braxton/i, /Kayla Rossi/i, /KC Spinelli/i, /Traci Spinelli/i, /Kylie Rae/i,
+	/Nikita Naridian/i,  /Kenzie Paige/i, /Kenzie HEnry/i, /Paige Henry/i, /Kiera Hogan/i, /Killer Kelly/i, /KiLynn King/i, /Kris Statlander/i, /Kristen Stadtlander/i, /Kylie Paige/i, /Kylie Alexa/i, 
+	/Briana Ray/i, /Katrina Cortez/i, /Catalina Garcia/i, /Catalina García/i, /La Hiedra/i, /La Rosa Negra/i, /Jamie Frost/i, /Leigh Laurel/i, /Kayden Carter/i, /Lacey Lane/i, /lady frost/i, /Mia Yim/i, 
+	/Lady Shani/i, /Lash Legend/i, /Layla Diggs/i, /Breanna Covington/i, /Laynie Luck/i, /Amber Lynn/i, /Lei'D Tapa/i, /Leila Grey/i, /Cat Cardoza/i, /Lena Kross/i, /Marie Malenko/i, /Leva Bates/i,
+	/Lexy Nair/i, /Leyla Hirsch/i, /Lilian Garcia/i, /Lizzy Evo/i, /Eliza Alexander/i, /Lizzy Styles/i, /Lola Yara/i, /Lola the Adventurer/i, /Lola Vice/i, /Valerie Loureda/i, /Lyra Valkyria/i, 
+	/Aoife Valkyrie/i, /Lady Valkyrie/i, /xia-li/i, /xia li/i, /Maggie Lee/i, /Maggie Moore/i, /Maggie Minerva/i, /Maggie McKinney/i, /Mai Sakurai/i, /Maki Itoh/i, /Jakara Jackson/i, /Mara Sadè/i, 
+	/Maria Manic/i, /Marina Shafir/i, /Marti Belle/i, /Masha Slamovich/i, /Masyn Holiday/i, /Darci Khan/i, /Maxxine Dupri/i, /Sofia Cromwell/i, /Utami Hayashishita/i, /mayvalentine/i, /mayaworld/i, 
+	/may valentine/i, /maya-world/i, /maya world/i, /Mayu Iwatani/i, /mazzerati/i, /mazzerati/i, /McKenzie Mitchell/i, /Megan Bayne/i, /Lady Maravilla/i, /Meg Monroe/i, /Mercedes Martinez/i, 
+	/Melissa Santos/i, /Melina Perez/i, /Mei Suruga/i, /Megumi Kudo/i, /Mickie James/i, /Alexis Laree/i, /Emilia McKenzie/i, /Millie McKenzie/i, /Mila Moore/i, /Kellie Morga/i, /Mima Shimoda/i,
+        /Mirai Maiumi/i, /Miranda Alize/i, /Miranda Salinas/i, /Mina Shirakawa/i, /Samantha Starr/i, /Shayna Wayne/i, /Myla Grace/i, /Trinity Fatu/i, /Naomi Knight/i, /Natalia Markova/i, /Nevaeh/i, 
+	/Ekaterina Bonnie/i, /Natalya Neidhart/i, /Jasmin Areebi/i, /Nikkita Lyons/i, /La Diablesa Rosa/i, /Nixon Newell/i, /Tegan Nox/i, /Nyla Rose/i, /Penelope Ford/i, /Persephone/i, /Rosemary/i,  
+	/Hayley Montoya/i, /Penina Tuilaepa/i, /Piper Niven/i, /Priscilla Kelly/i, /Gigi Dolin/i, /Queen Aminata/i, /Rachael Ellering/i, /Rachael Evers/i, /Aliyah/i, /Nia Jax/i, /Lina Fanene/i, 
+	/Nikki Blackheart/i, /Nikki Cross/i, /Nina Samuels/i, /Raquel Rodriguez/i, /Raquel González/i, /Reina González/i, /Victoria González/i, /Reina Dorada/i, /Reyna Dorada/i, /Renee Michelle/i,
+	/Haze Jameson/i, /Renee Paquette/i, /Renee Young/i, /Rhea Ripley/i, /Demi Bennett/i, /Robyn Renegade/i, /Ronda Rousey/i, /Courtney Rush/i, /PJ Tyler/i, /Casey Maguire/i, /Roxanne Perez/i, 
+	/Ruthie Jay/i, /Ryo Mizunami/i, /Aya Mizunami/i, /Ayane Mizumura/i, /Sadie Gibbs/i, /Sam Leterna/i, /Sam L'Eterna/i, /Samantha L'Eterna/i, /Santana Garrett/i, /Sarah Schreiber/i, /Paige/i, 
+	/Saraya/i, /Sareee/i, /Sarray/i, /Sexy Star/i, /Savannah Evans/i, /Saya Kamitani/i, /Scarlett Bordeaux/i, /Elizabeth Chihaia/i, /Serena Deeb/i, /Session Moth Martina/i, /Sexy Dulce/i, 
+	/Dulce Garcia/i, /Dulce Poly/i, /Alexandra Barrulas/i, /Shayna Baszler/i, /Shazza McKenzie/i, /Chantelle Bathory/i, /Shinobu Kandori/i, /Shotzi Blackheart/i, /Sirena Linton/i, /Tay Melo/i,
+	/Dani Sekelsky/i, /Skylar Raye/i, /Sloane Jacobs/i, /Sloane Jacobs/i, /The Notorious MiMi/i, /Dani Sekelsky/i, /SoCal Val/i, /Valerie Wyndham/i, /Sol Ruca/i, /Steph De Lander/i, /Skylar Raye/i, 
+	/Persia Pirotta/i, /Stephanie Vaquer/i, /Stori Denali/i, /Su Yung/i, /Susie/i, /Susan/i, /Sussy Love/i, /Tamina Snuka/i, /Tasha Steelz/i, /Tatevik The Gamer/i, /Tatevik Hunanyan/i, /Tatum Paxley/i, 
+	/Tatyanna Dumas/i, /Tay Conti/i, /Taya Valkyrie/i, /Kira Foster/i, /Tessa Blanchard/i, /Thea Hail/i, /Thunder Rosa/i, /Tiffany Nieves/i, /Tiffany Stratton/i, /Tiffany/i, /Toni Storm/i, /Trish Adora/i, 
+	/Trish Stratus/i, /Tyra Mae Steele/i, /Tamyra Mensah-Stock/i, /Valentynna Reis/i, /Valentina Feroz/i, /Vicious Vicki/i, /Vicki Venuto/i, /Victoria Andreola/i, /Vivacious Vicki/i, /Vicky Haskins/i, 
+	/Amber Vixen/i, /Alicia Fox/i, /Victoria Yuzuki/i, /Vita VonStarr/i, /Wendy Choo/i, /Willow Nightingale/i, /Nightingale/i, /Wren Sinclair/i, /Madi Wrenkowski/i, /Zelina Rosita/i, /Yuka Sakazaki/i, 
+	/Zayda Steel/i, /Zena Sterling/i, /Olena Sadovska/i, /Zoey Stark/i, /Lacey Ryan/i, /Zoë Sager/i, /Zelina Vega/i, /Rosita/i, /Victoria Crawford/i,
+    ];;
     }
 
-    console.log("WebCleaner running on targeted video domain.");
+    function installBraveFoxTenorSearchGuard() {
+        const tenorBlockedRegexWords = createStaticBlockedRegexWords();
+        let redirecting = false;
+        const homeUrl = 'https://tenor.com/';
+
+        const redirectHome = () => {
+            if (redirecting) return;
+            redirecting = true;
+            try { window.stop && window.stop(); } catch (e) {}
+            try { window.location.replace(homeUrl); }
+            catch (e) { window.location.href = homeUrl; }
+        };
+
+        const getInputQuery = input => String(input && input.value || '').trim();
+
+        const blockQuery = (query, event) => {
+            const text = String(query || '').trim();
+            if (!text || !tenorBlockedRegexWords.some(regex => regexMatches(regex, text))) return false;
+            if (event) {
+                try { event.preventDefault(); } catch (e) {}
+                try { event.stopImmediatePropagation(); } catch (e) {}
+                try { event.stopPropagation(); } catch (e) {}
+            }
+            redirectHome();
+            return true;
+        };
+
+        const queryFromCurrentUrl = () => {
+            try {
+                const url = new URL(window.location.href);
+                for (const name of ['q', 'query', 'search']) {
+                    const value = url.searchParams.get(name);
+                    if (value && value.trim()) return value.trim();
+                }
+
+                const match = url.pathname.match(/^\/search\/(.+?)(?:-gifs|-stickers)?\/?$/i);
+                if (match) {
+                    return decodeURIComponent(match[1]).replace(/[-_+]+/g, ' ').trim();
+                }
+            } catch (e) {}
+            return '';
+        };
+
+        const checkCurrentUrl = () => {
+            const query = queryFromCurrentUrl();
+            if (query) blockQuery(query, null);
+        };
+
+        document.addEventListener('submit', event => {
+            const form = event.target && event.target.closest ? event.target.closest('form.SearchBar, form') : null;
+            if (!form) return;
+            const input = form.querySelector('input[name="q"]');
+            if (!input) return;
+            blockQuery(getInputQuery(input), event);
+        }, true);
+
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            const input = event.target && event.target.matches && event.target.matches('input[name="q"]')
+                ? event.target
+                : null;
+            if (!input || !input.closest('form.SearchBar, .search-bar-wrapper')) return;
+            blockQuery(getInputQuery(input), event);
+        }, true);
+
+        document.addEventListener('click', event => {
+            const trigger = event.target && event.target.closest
+                ? event.target.closest('form.SearchBar .iconfont-search, .search-bar-wrapper .iconfont-search')
+                : null;
+            if (!trigger) return;
+            const form = trigger.closest('form.SearchBar');
+            const input = form && form.querySelector('input[name="q"]');
+            if (!input) return;
+            blockQuery(getInputQuery(input), event);
+        }, true);
+
+        // Tenor is a React SPA. Catch a search route produced by code that bypasses the native form
+        // submit event, without polling or observing the DOM.
+        ['pushState', 'replaceState'].forEach(method => {
+            try {
+                const original = history[method];
+                if (typeof original !== 'function') return;
+                history[method] = function() {
+                    const result = original.apply(this, arguments);
+                    queueMicrotask(checkCurrentUrl);
+                    return result;
+                };
+            } catch (e) {}
+        });
+        window.addEventListener('popstate', checkCurrentUrl, true);
+        window.addEventListener('pageshow', checkCurrentUrl, true);
+        checkCurrentUrl();
+    }
+
+    if (BRAVEFOX_IS_TENOR) {
+        installBraveFoxTenorSearchGuard();
+        return;
+    }
+
+    // From this point onward the file is running on XVideos only.
+    const targetDomains = ['xvideos.com'];
+    const currentHost = BRAVEFOX_FILTERING_HOST;
+    const isTargetDomain = BRAVEFOX_IS_XVIDEOS;
+    if (!isTargetDomain) return;
+
+    console.log('WebCleaner running on targeted video domain.');
 
     // --- DOCUMENT-START NO-GLIMPSE SHIELD ---
     // Hide result cards before their title/metadata can flash on screen. Clean cards are
     // revealed only after the regex scanner explicitly marks them as safe.
-    const VIDEO_RESULT_CARD_SELECTOR = '.thumb-block';
+    function isXVideosCategoryListingRoute() {
+        return /^\/c(?:\/|$)/i.test(String(window.location.pathname || ''));
+    }
+
+    function isXVideosLanguageListingRoute() {
+        return /^\/lang\/[^/]+(?:\/|$)/i.test(String(window.location.pathname || ''));
+    }
+
+    function isLeanXVideosListingRoute() {
+        return isXVideosCategoryListingRoute() || isXVideosLanguageListingRoute();
+    }
+
+    // XVideos reuses .thumb-block for both real videos and profile-directory tiles. Only gate
+    // cards that expose a durable video identity (a video_* / video-thumb-* id, a video data
+    // attribute, or a watch-page link). Native ad shells are deliberately excluded: they can carry
+    // a video-like id without ever hydrating a playable identity, which otherwise creates retries.
+    const VIDEO_RESULT_CARD_SELECTOR =
+        '.thumb-block:not(.premium-search-on-free):not(.thumb-ad):is(' +
+        '[id^="video_"], [id^="video-thumb-"], [data-video-id], [data-video], ' +
+        ':has(a[href^="/video"]), :has(a[href*=".xvideos.com/video"])' +
+        ')';
+    const XVVIDEOS_GENERIC_THUMB_BLOCK_SELECTOR = '.thumb-block:not(.premium-search-on-free)';
+    const XVVIDEOS_PROFILE_VIDEO_TAB_HTML_CLASS = 'bravefox-profile-video-tab-active';
+    const XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR = XVVIDEOS_GENERIC_THUMB_BLOCK_SELECTOR;
+    const NO_GLIMPSE_STYLE_REVISION = 'literal-regex-cache-v5';
     const VIDEO_RESULT_STATE_ATTR = 'data-bravefox-video-filter-state';
     const VIDEO_RESULT_SOURCE_ATTR = 'data-bravefox-video-source';
     const VIDEO_RESULT_REVISION_ATTR = 'data-bravefox-video-filter-revision';
@@ -37,7 +336,8 @@
     const VIDEO_RESULT_COMMITTED_ATTR = 'data-bravefox-video-batch-committed';
     const VIDEO_RESULT_MAX_PENDING_RETRIES = 18;
     const VIDEO_RESULT_PENDING_RETRY_MS = 80;
-    const VIDEO_RESULT_CACHE_STORAGE_KEY = 'bravefox_xvideos_video_verdict_cache_v3';
+    const VIDEO_RESULT_CACHE_STORAGE_KEY = 'bravefox_xvideos_video_verdict_cache_v5';
+    const VIDEO_RESULT_LEGACY_CACHE_STORAGE_KEY = 'bravefox_xvideos_video_verdict_cache_v4';
     const VIDEO_RESULT_CACHE_MAX = 1600;
 
     // The desktop XVideos layout is five cards wide. Batches are counted by approved cards rather
@@ -84,6 +384,11 @@
     const VIDEO_PROFILE_TAB_HYDRATION_GRACE_MS = 1600;
     const VIDEO_PROFILE_TAB_DOM_QUIET_MS = 550;
     const VIDEO_PROFILE_TAB_EMPTY_WATCH_MS = 10000;
+    // Search/category/listing pages often mount fewer than forty cards. Once their initial DOM has
+    // been quiet briefly, process the mounted grid instead of waiting for the thirty-second guard.
+    const VIDEO_LISTING_HYDRATION_GRACE_MS = 1200;
+    const VIDEO_LISTING_DOM_QUIET_MS = 450;
+    const VIDEO_EMPTY_GRID_WATCH_MS = 6000;
     const VIDEO_RESULT_SETTLED_STATES = new Set(['clean', 'blocked']);
 
     // Approved cards far outside the viewport keep their place in the feed but stop costing
@@ -93,12 +398,13 @@
         (window.innerHeight || document.documentElement.clientHeight || 900) * 2
     ));
 
-    // Uncached cards are checked against both persistent on-card metadata and the linked video page.
-    // The queue is deduplicated and bounded so each canonical URL is fetched only once per verdict revision.
+    // Linked-page inspection is now a homepage-only strict fallback. Search, tag, profile and
+    // watch-page recommendation cards are classified from their already-mounted local metadata,
+    // avoiding dozens of extra page fetches that used to keep subpages loading indefinitely.
     const VIDEO_PAGE_FETCH_CONCURRENCY_NORMAL = 4;
     const VIDEO_PAGE_FETCH_CONCURRENCY_NEAR = 6;
     const VIDEO_PAGE_FETCH_CONCURRENCY_URGENT = 8;
-    const VIDEO_PAGE_FETCH_TIMEOUT_MS = 5000;
+    const VIDEO_PAGE_FETCH_TIMEOUT_MS = 2500;
     const VIDEO_PAGE_METADATA_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
     const VIDEO_PAGE_METADATA_FAILURE_CACHE_TTL_MS = 30 * 60 * 1000;
     const VIDEO_PAGE_METADATA_CACHE_MAX = 800;
@@ -193,6 +499,37 @@
     ].join(', ');
     const XVVIDEOS_MAIN_CATEGORY_BUTTON_SELECTOR = 'button#site-main-cat.head__choice--main-cat';
 
+    // RED/Premium promos are not playable free-video results. XVideos gives their pseudo-cards
+    // category URLs instead of video URLs, so feeding them into the normal card scanner leaves them
+    // stuck in the checking state and makes the red banner/cards flicker during repeated retries.
+    const XVVIDEOS_PREMIUM_PROMO_SELECTOR = [
+        '.premium-results-line',
+        '.premium-results-line-title',
+        '.premium-results-line-see-more',
+        '.thumb-block.premium-search-on-free',
+        'a.banner-goto-redtab[href*="#_tabRed"]',
+        'a[href*="#_tabRed"]',
+        'a.xv-slim-tab-btn.tab-button.premium[title="RED"]',
+        'a.tab-button.premium[title="RED"]',
+        'a#anc-tst-premium-btn[href*="xvideos.red"]',
+        'a.head__btn.head__btn--join[href*="xvideos.red"]',
+        'a.red-ticket[href]',
+        'a[href^="/c/p:"]',
+        'a[href*="/c/p:"]',
+	'ul.search-premium-tabs',
+	'div.premium-free-switch',
+	'div.premium-free-switch-item.premium-free-switch-premium'
+    ].join(', ');
+    const XVVIDEOS_PREMIUM_TABS_SELECTOR = 'ul.search-premium-tabs';
+    const XVVIDEOS_PROFILE_TRANS_BUTTON_SELECTOR = 'a[href*="/shemale"][href*="#_tabVideos"]';
+    const XVVIDEOS_PROFILE_TRANS_ICON_SELECTOR = '.icf-sexe-trans-v2';
+    const XVVIDEOS_ORIENTATION_BUTTON_SELECTOR = [
+        'button#site-sexual-orientation',
+        'button#site-sexual-orientation-switch',
+        'button.head__choice--sexual-orientation',
+        'button.head__choice--orientation'
+    ].join(', ');
+
 
     function isWatchPathForInitialGuard(pathname) {
         const path = String(pathname || '').toLowerCase();
@@ -200,17 +537,79 @@
         return /^\/video(?:[._\/-]|[a-z0-9])/i.test(path);
     }
 
-    function isFiniteProfileVideoTabRoute() {
+    function isProfileDirectoryRoute() {
+        const path = String(window.location.pathname || '/')
+            .toLowerCase()
+            .replace(/\/+$/, '') || '/';
+        return /^\/(?:profiles|pornstars|channels|model-channels)$/i.test(path);
+    }
+
+    function isProfileEntityRoute() {
         const path = String(window.location.pathname || '').toLowerCase();
+        return /^\/(?:profiles|pornstars|channels|model-channels)\/[^/]+(?:\/|$)/i.test(path);
+    }
+
+    function isRootSlugProfileRoute() {
+        const path = String(window.location.pathname || '/')
+            .toLowerCase()
+            .replace(/^\/+|\/+$/g, '');
+        if (!path || path.includes('/')) return false;
+
+        return !new Set([
+            'c', 'category', 'categories', 'tags', 'lang', 'search', 'video', 'videos',
+            'profiles', 'pornstars', 'channels', 'model-channels', 'best', 'new', 'upload',
+            'account', 'login', 'logout', 'signup', 'premium'
+        ]).has(path);
+    }
+
+    function isFiniteProfileVideoTabRoute() {
+        const prefixedProfile = isProfileEntityRoute();
+        const rootSlugProfile = isRootSlugProfileRoute();
+        if (!prefixedProfile && !rootSlugProfile) return false;
+
         const hash = String(window.location.hash || '').toLowerCase();
-        return /^\/(?:profiles|pornstars|channels|model-channels)(?:\/|$)/i.test(path) &&
-            hash.includes('tabvideos');
+        if (hash.includes('tabvideos')) return true;
+
+        try {
+            const tab = String(new URLSearchParams(window.location.search).get('tab') || '').toLowerCase();
+            if (tab === 'videos' || tab === 'video') return true;
+        } catch (e) {}
+
+        // Only older prefixed profile/channel routes may default to Videos without an explicit hash.
+        return prefixedProfile && !hash;
+    }
+
+    function syncXVideosProfileVideoTabState() {
+        try {
+            document.documentElement.classList.toggle(
+                XVVIDEOS_PROFILE_VIDEO_TAB_HTML_CLASS,
+                isFiniteProfileVideoTabRoute()
+            );
+        } catch (e) {}
+    }
+
+    syncXVideosProfileVideoTabState();
+
+    function isCleanXVideosHomepageRoute() {
+        return String(window.location.pathname || '/') === '/' &&
+            String(window.location.search || '') === '' &&
+            String(window.location.hash || '') === '';
     }
 
     function shouldUseFullInitialVideoGuard() {
-        // Entity video tabs hydrate asynchronously and may expose only six, twenty, or another
-        // finite number of cards. Keep the page chrome visible and gate the cards themselves.
-        return !isWatchPathForInitialGuard(window.location.pathname) && !isFiniteProfileVideoTabRoute();
+        // Every subpage keeps its chrome visible and relies on the per-card no-glimpse gate. The
+        // full-screen shield is reserved for the clean homepage, where it was already reliable.
+        return isCleanXVideosHomepageRoute() &&
+            !isWatchPathForInitialGuard(window.location.pathname) &&
+            !isFiniteProfileVideoTabRoute();
+    }
+
+    function shouldRevealVideoCardsIndividually() {
+        // XVideos hydrates most non-home grids lazily. Atomic display:none batching prevented those
+        // cards from ever entering the viewport, while linked-page verification flooded the network.
+        // Keep strict homepage batching, but let every other route reveal each locally approved card
+        // immediately after the no-glimpse scanner has classified it.
+        return !isCleanXVideosHomepageRoute();
     }
 
     function hideInitialVideoGuard(reason) {
@@ -567,6 +966,13 @@
     const TAGS_PAGE_SIGNATURE_ATTR = 'data-bravefox-tags-page-filter-signature';
     const TAGS_PAGE_ENTRY_STATE_ATTR = 'data-bravefox-tags-page-entry-state';
 
+    // Watch-page keyword pills are classified one anchor at a time. They are intentionally kept
+    // out of the broad metadata/container scanner so one blocked tag cannot erase the whole tag row.
+    const WATCH_PAGE_TAG_HTML_CLASS = 'bravefox-watch-tag-filtering-active';
+    const WATCH_PAGE_TAG_SELECTOR = 'a:is(.btn.is-keyword, .is-keyword.btn)[href]';
+    const WATCH_PAGE_TAG_STATE_ATTR = 'data-bravefox-watch-tag-filter-state';
+    const WATCH_PAGE_TAG_SIGNATURE_ATTR = 'data-bravefox-watch-tag-filter-signature';
+
     function isTagsIndexPage() {
         return /^\/tags\/?$/i.test(String(window.location.pathname || ''));
     }
@@ -577,27 +983,42 @@
         } catch (e) {}
     }
 
+    function syncWatchPageTagNoGlimpseState() {
+        try {
+            document.documentElement.classList.toggle(WATCH_PAGE_TAG_HTML_CLASS, isLikelyVideoWatchPage());
+        } catch (e) {}
+    }
+
     syncTagsPageNoGlimpseState();
+    syncWatchPageTagNoGlimpseState();
+    syncXVideosProfileVideoTabState();
 
     function injectNoGlimpseCSS() {
         try {
-            if (document.getElementById('bravefox-filtering-no-glimpse')) return;
+            // Replace an older generation's stylesheet once. Extension reloads can leave the
+            // previous content script and its broader .thumb-block rule alive until the page reloads.
+            const existingStyle = document.getElementById('bravefox-filtering-no-glimpse');
+            if (existingStyle &&
+                existingStyle.getAttribute('data-bravefox-style-revision') === NO_GLIMPSE_STYLE_REVISION) {
+                return;
+            }
+            if (existingStyle) existingStyle.remove();
 
             document.documentElement.classList.add('bravefox-filtering-active');
 
             const style = document.createElement('style');
             style.id = 'bravefox-filtering-no-glimpse';
+            style.setAttribute('data-bravefox-style-revision', NO_GLIMPSE_STYLE_REVISION);
             style.textContent = `
-                /* Stealth queue: uncommitted cards contribute no pixels and no page height.
-                   The document naturally ends after the final approved row; a passive sentinel
-                   stages the next preferred eight rows and commits them atomically. */
+                /* No-glimpse queue: pending cards keep their native layout box so XVideos' own
+                   viewport observers and lazy loaders can hydrate their links, titles and thumbnails.
+                   They remain completely invisible and non-interactive until classified. */
                 html.bravefox-filtering-active ${VIDEO_RESULT_CARD_SELECTOR} {
                     transition: none !important;
                     animation: none !important;
                 }
 
                 html.bravefox-filtering-active ${VIDEO_RESULT_CARD_SELECTOR}:not([${VIDEO_RESULT_STATE_ATTR}="clean"]):not([${VIDEO_RESULT_STATE_ATTR}="blocked"]):not([${VIDEO_RESULT_COMMITTED_ATTR}="true"]) {
-                    display: none !important;
                     visibility: hidden !important;
                     opacity: 0 !important;
                     pointer-events: none !important;
@@ -643,6 +1064,28 @@
                     animation-play-state: paused !important;
                 }
 
+                /* Root-slug profile video cards are handled separately from the global listing selector.
+                   Only shells that BraveFox has actually classified receive state styling. */
+                html.${XVVIDEOS_PROFILE_VIDEO_TAB_HTML_CLASS} ${XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR}[${VIDEO_RESULT_STATE_ATTR}]:not([${VIDEO_RESULT_STATE_ATTR}="clean"]):not([${VIDEO_RESULT_STATE_ATTR}="blocked"]) {
+                    visibility: hidden !important;
+                    opacity: 0 !important;
+                    pointer-events: none !important;
+                    transition: none !important;
+                    animation: none !important;
+                }
+
+                html.${XVVIDEOS_PROFILE_VIDEO_TAB_HTML_CLASS} ${XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR}[${VIDEO_RESULT_STATE_ATTR}="blocked"] {
+                    display: none !important;
+                    visibility: hidden !important;
+                    opacity: 0 !important;
+                    pointer-events: none !important;
+                }
+
+                html.${XVVIDEOS_PROFILE_VIDEO_TAB_HTML_CLASS} ${XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR}[${VIDEO_RESULT_STATE_ATTR}="clean"] {
+                    visibility: visible !important;
+                    opacity: 1 !important;
+                }
+
                 html.${TAGS_PAGE_HTML_CLASS} a[href^="/tags/"]:not([${TAGS_PAGE_STATE_ATTR}="clean"]),
                 html.${TAGS_PAGE_HTML_CLASS} a[href^="/lang/"]:not([${TAGS_PAGE_STATE_ATTR}="clean"]),
                 html.${TAGS_PAGE_HTML_CLASS} a[href^="/tags/"][${TAGS_PAGE_STATE_ATTR}="blocked"],
@@ -656,16 +1099,47 @@
                     animation: none !important;
                 }
 
+                /* Individual watch-page tags stay invisible only until their own label/URL verdict
+                   is known. A blocked sibling never condemns the surrounding metadata container. */
+                html.${WATCH_PAGE_TAG_HTML_CLASS} ${WATCH_PAGE_TAG_SELECTOR}:not([${WATCH_PAGE_TAG_STATE_ATTR}="clean"]),
+                html.${WATCH_PAGE_TAG_HTML_CLASS} ${WATCH_PAGE_TAG_SELECTOR}[${WATCH_PAGE_TAG_STATE_ATTR}="blocked"] {
+                    display: none !important;
+                    visibility: hidden !important;
+                    opacity: 0 !important;
+                    pointer-events: none !important;
+                    transition: none !important;
+                    animation: none !important;
+                }
+
                 ${XVVIDEOS_MAIN_CATEGORY_BUTTON_SELECTOR},
-                [data-bravefox-static-main-cat="true"] {
+                [data-bravefox-static-main-cat="true"],
+                [data-bravefox-static-orientation="true"] {
                     pointer-events: none !important;
                     cursor: default !important;
                     transition: none !important;
                     animation: none !important;
                 }
 
+                [data-bravefox-static-orientation="true"]::after {
+                    content: none !important;
+                    display: none !important;
+                }
+
+                [data-bravefox-static-orientation="true"] .caret,
+                [data-bravefox-static-orientation="true"] [class*="caret"],
+                [data-bravefox-static-orientation="true"] [class*="chevron"],
+                [data-bravefox-static-orientation="true"] .icf-angle-down,
+                [data-bravefox-static-orientation="true"] .icf-caret-down {
+                    display: none !important;
+                }
+
                 ${VIDEO_OVERLAY_LINK_SELECTOR},
                 ${UNWANTED_XVIDEOS_MENU_BUTTON_SELECTOR},
+                ${XVVIDEOS_PREMIUM_PROMO_SELECTOR},
+                ${XVVIDEOS_PROFILE_TRANS_BUTTON_SELECTOR},
+                ${XVVIDEOS_PROFILE_TRANS_ICON_SELECTOR},
+                ul.search-premium-tabs li:has(a[href*="/c/p:"]),
+                ul.search-premium-tabs li:has(.icf-ticket-red),
                 .video-overlay-title-txt,
                 .video-overlay-title-icon {
                     display: none !important;
@@ -697,6 +1171,7 @@
     let __lastKnownUrl = window.location.href;
     let isRedirectingNow = false;
     let spaRootObserver = null;
+    let videoOverlayObserver = null;
     let spaRoutePollInterval = null;
     let spaBroadMutationTimer = null;
     let spaRouteGeneration = 0;
@@ -831,7 +1306,7 @@
     function cleanup() {
         if (isCleaningUp) return;
         isCleaningUp = true;
-        
+
         try {
             observerInstances.forEach(observer => {
                 try {
@@ -842,6 +1317,7 @@
             });
             observerInstances.clear();
             spaRootObserver = null;
+            videoOverlayObserver = null;
             spaRuntimeStarted = false;
 
             if (spaRoutePollInterval !== null) {
@@ -952,28 +1428,9 @@
     ];
 
     // Regex-only static blocklist.
-    const blockedRegexWords = [
-        /deepn/i, /deepf/i, /deeps/i, /udif/i, /nudif/i, /ndres/i, /alexa/i, /poshspi(?:c|s)y/i, /face[\s_-]*swap/i, /swap[\s_-]*face/i, /Brie/i,
-        /face[\s_-]*morph/i, /morph[\s_-]*face/i, /dream[\s_-]*booth/i, /wondershare/i, /filmora/i, /app/i, /Liv[\s_-]+Morgan/i, /Liv[\s_-]+Xoxo/i, 
-	/Morgan[\s_-]+Xoxo/i, /Sweeney/i, /Sydne/i, /Steward/i, /Stewart/i, /Kristen/i, /Kriis/i, /Bella/i, /Nikki/i, /Chyna/i, /China/i, /Hulk/i,
-        /lex[\s_-]*bl/i, /leks[\s_-]*bl/i, /Lexi/i, /Hogan/i, /Tiffy/i, /Bliss/i, /Marg[\s_-]+Robb/i, /Margo/i, /Robbie/i, /Elyna/i, /Elyina/i, 
-	/Eliyna/i, /Eliyina/i, /Dua[\s_-]*Lipa/i, /Kamitani/i, /Katie/i, /Nikkita/i, /Lisa[\s_-]+Marie/i, /Lisa[\s_-]+Varon/i, /Marie[\s_-]+Varon/i,
-	/Takaichi/i, /Sakurai/i, /Arrivederci/i, /Alice/i, /Alicy/i, /Alici/i, /Arisu[\s_-]+Endo/i, /Crowley/i, /Ruby[\s_-]+Soho/i, /Castillo/i,
-	/Monica/i, /Matsumoto/i, /Shino[\s_-]+Suzuki/i, /Lily[\s_-]+Adam/i, /Lana/i, /Blake/i, /Bailey/i, /Bayley/i, /Naomi/i, /Irving/i, /Monroe/i, 
-	/Del[\s_-]+Rey/i, /McMahon/i, /CJ[\s_-]+Perry/i, /Stratton/i, /Ruca/i, /Lola[\s_-]+Vice/i, /shirakawa/i, /Belts[\s_-]+Mone/i, /gay/i, /pride/i,
-	/Amanda[\s_-]+Huber/i, /Joanie[\s_-]+Laurer/i, /AEW/i, /TNA/i, /WWE/i, /NJPW/i, /LGBT/i, /Trans/i, /playboy/i, /anorexic/i, /Arab/i, /Sol/i, 
-        /deviant[\s_-]*art/i, /r[\s_-]*34/i, /Stee/i, /Sweee/i, /Waaa/i, /Transsexual/i, /Femdom/i, /Animat/i, /AI Porn/i, /AI Nude/i, /AI Pussy/i,
-	/AI Anal/i, /AI Sex/i, /guy-guy/i, /homo/i, /grandpa/i, /grandma/i, /aunty/i, /piss/i, /pee/i, /crap/i, /shit/i, /fece/i, /Cuckold/i, /Bikini/i, 
-	/Lingerie/i, /Hentai/i, /Animation/i, /Artific/i, /Intel/i, /male-/i, /africa/i, /japan/i, /china/i, /chine/i, /twerk/i, /strip/i, /whori/i, 
-	/muscular/i, /-male/i, /male-/i, /shemale/i, /-red/i, /red-/i, /shemale/i, /old-young/i, /young-old/i, /old-vs-young/i, /Nude AI/i, /nudi AI/i, 
-	/undre AI/i, /Nud3/i, /Nud1/i, /Naked AI/i, /-AI/i, /AI-/i, /-AI-/i, /AI App/i, /-App/i, /App-/i, /Appli/i, /software/i, /-IA/i, /IA-/i, /-IA-/i,
-
-        // Symbols and standalone abbreviations
-	/\*/i, /#/i, /(^|[^a-z0-9])AI([^a-z0-9]|$)/i, 
-
-	// Boundaried Regex blocklist
-        /\bMLM\b/i, /\bLLM\b/i, /\bAI\b/i, /\bAsia\b/i, /\bAsian\b/i, /\bMale\b/i, /\bRed\b/i, /\bOld\b/i, /\bIA\b/i,
-    ];
+    // Dense keyword-array formatting rule: keep at most 14 entries per physical line;
+    // start each logical section on a fresh line, and leave selector/config arrays one item per line.
+    const blockedRegexWords = createStaticBlockedRegexWords();
 
     // Dynamic patterns imported from wrestling.js / TheSmackDownHotel.
     let dynamicWrestlerRegexWords = [];
@@ -1008,6 +1465,9 @@
 
     function scheduleFullFilterPass() {
         const run = () => {
+            syncXVideosProfileVideoTabState();
+            removeXVideosPremiumPromos();
+            removeXVideosProfileTransButtons();
             removeUnwantedXVideosMenuButtons();
             removeExternalVideoOverlayLinks();
             filterSearchAutocompleteEntries();
@@ -1016,6 +1476,7 @@
             checkAndRedirectVideoPageBlockedContent();
             removeBlockedCategoryEntries();
             filterTagsPageLinks();
+            filterWatchPageKeywordTags();
             hideBlockedContent();
             deleteContent();
         };
@@ -1027,8 +1488,7 @@
 
     // --- DYNAMIC WRESTLER BANS (IMPORTED FROM TAG TEAM) ---
     const dynamicWrestlerExclusions = new Set([
-        'melina', 'melina-perez', 'aj-lee', 'aj', 'becky-lynch', 'becky',
-        'katarina', 'jojo'
+        'melina', 'melina-perez', 'aj-lee', 'aj', 'becky-lynch', 'becky', 'katarina', 'jojo',
     ]);
 
     function buildDynamicWrestlerPatterns(urls) {
@@ -1166,6 +1626,44 @@
         }
     }
 
+    function getWatchPageTagSearchableValue(link) {
+        const values = [
+            link.innerText || '',
+            link.getAttribute('title') || '',
+            link.getAttribute('aria-label') || ''
+        ];
+
+        try {
+            const parsed = new URL(link.getAttribute('href') || '', window.location.origin);
+            values.push(decodeURIComponent(parsed.pathname).replace(/[-_./]+/g, ' '));
+            parsed.searchParams.forEach(value => values.push(value));
+        } catch (e) {}
+
+        return values.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function filterWatchPageKeywordTags() {
+        syncWatchPageTagNoGlimpseState();
+        if (!isLikelyVideoWatchPage()) return;
+
+        try {
+            document.querySelectorAll(WATCH_PAGE_TAG_SELECTOR).forEach(link => {
+                if (!link || !link.isConnected) return;
+                const searchableValue = getWatchPageTagSearchableValue(link);
+                const signature = simpleTextHash(searchableValue);
+                if (link.getAttribute(WATCH_PAGE_TAG_SIGNATURE_ATTR) === signature) return;
+
+                link.setAttribute(WATCH_PAGE_TAG_SIGNATURE_ATTR, signature);
+                link.setAttribute(
+                    WATCH_PAGE_TAG_STATE_ATTR,
+                    containsBlockedContent(searchableValue) ? 'blocked' : 'clean'
+                );
+            });
+        } catch (e) {
+            console.log('Error filtering watch-page tags: ' + e.message);
+        }
+    }
+
     // Remove category/menu/tag entries whose label or URL contains a banned term.
     // This scanner is intentionally site-wide: XVideos uses different category markup on the
     // homepage, search pages, watch pages, profile pages, and dynamically replaced menus.
@@ -1240,6 +1738,11 @@
 
         const rawHref = link.getAttribute('href') || '';
         if (!rawHref || /^(?:javascript:|mailto:|tel:|#)/i.test(rawHref.trim())) return false;
+        if (link.matches && link.matches(
+            '#header-menu-toggle, .animated-hamburger, .ellipsis, [data-toggle], [aria-controls]'
+        )) return false;
+        if (link.closest && link.closest('.pagination, footer, #footer, .footer, .botLinks')) return false;
+        if (isLikelyVideoWatchPage() && link.matches && link.matches(WATCH_PAGE_TAG_SELECTOR)) return false;
 
         let parsed;
         try {
@@ -1258,6 +1761,15 @@
 
         const pathname = parsed.pathname || '';
         const lowerPath = pathname.toLowerCase();
+
+        // A full same-page URL ending in `#` is still only a UI/control target. The category page's
+        // hamburger and pagination ellipsis use this shape; removing them can make XVideos rebuild
+        // the node forever and turn the page into a main-thread mutation furnace.
+        try {
+            const current = new URL(window.location.href);
+            if (rawHref.includes('#') && parsed.origin === current.origin && parsed.pathname === current.pathname &&
+                parsed.search === current.search) return false;
+        } catch (e) {}
 
         // Never classify actual videos, profiles, channels, or model pages as category entries.
         if (isVideoWatchPath(pathname)) return false;
@@ -1292,19 +1804,17 @@
 
     function getCategorySearchableValue(link) {
         const rawHref = link.getAttribute('href') || '';
-        let decodedHref = rawHref;
-        try { decodedHref = decodeURIComponent(rawHref.replace(/\+/g, ' ')); } catch (e) {}
-
         const values = [
-            link.textContent || '',
+            link.innerText || '',
             link.getAttribute('title') || '',
-            link.getAttribute('aria-label') || '',
-            decodedHref
+            link.getAttribute('aria-label') || ''
         ];
 
         try {
             const parsed = new URL(rawHref, window.location.origin);
-            values.push(parsed.pathname.replace(/[-_./]+/g, ' '));
+            // Deliberately omit parsed.hash and the raw href. The shared blocklist contains `/#/i`,
+            // while XVideos uses harmless current-page fragments for menu/pagination controls.
+            values.push(decodeURIComponent(parsed.pathname).replace(/[-_./]+/g, ' '));
             parsed.searchParams.forEach(value => values.push(value));
         } catch (e) {}
 
@@ -1314,12 +1824,19 @@
     function getCategoryEntryForRemoval(link) {
         if (!link || !link.closest) return link;
 
-        return link.closest(
+        const entry = link.closest(
             'li.dyn, li.dyntop-cat, li[class*="top-cat"], li[class*="category"], ' +
             'li[class*="categories"], [data-category], [class*="category-item"], ' +
             '[class*="category-card"], [class*="category-tile"], .video-tags-list li, ' +
             '.ordered-label-list li, li'
-        ) || link;
+        );
+        if (!entry) return link;
+
+        // Generic list items are sometimes shared wrappers containing several independent links.
+        // Never remove that shared parent merely because one descendant matched the blocklist.
+        const ownedCategoryLinks = Array.from(entry.querySelectorAll('a[href]'))
+            .filter(candidate => isCategoryMenuLink(candidate));
+        return ownedCategoryLinks.length <= 1 ? entry : link;
     }
 
     function removeBlockedCategoryEntries() {
@@ -1614,6 +2131,11 @@ ${searchableValue}`);
         }
     }
 
+    try {
+        localStorage.removeItem(VIDEO_RESULT_LEGACY_CACHE_STORAGE_KEY);
+        sessionStorage.removeItem(VIDEO_RESULT_LEGACY_CACHE_STORAGE_KEY);
+    } catch (e) {}
+
     function loadVideoVerdictCache() {
         try {
             const raw = localStorage.getItem(VIDEO_RESULT_CACHE_STORAGE_KEY) ||
@@ -1713,7 +2235,7 @@ ${searchableValue}`);
             // thumbnail id and the literal THUMBNUM placeholder. That URL always 404s.
             pathname = pathname
                 .replace(/\/\d+\/THUMBNUM(?=\/|$)/ig, '')
-                .replace(/\/THUMBNUM(?=\/|$)/ig, '')
+                .replace(/THUMBNUM(?=\/|$)/ig, '')
                 .replace(/\/{2,}/g, '/');
 
             if (/THUMB(?:NUM|ID|URL)?/i.test(pathname)) return '';
@@ -1748,6 +2270,8 @@ ${searchableValue}`);
         const persistentSelectors = [
             '.thumb-title a[href]',
             'a.thumb-title[href]',
+            '.thumb-under .title a[href]',
+            '.title a[href]',
             'a.video-title[href]',
             '[data-video-title] a[href]',
             'a[data-video-url][data-title]',
@@ -1783,6 +2307,14 @@ ${searchableValue}`);
         }
 
         // Fallbacks are used only for a card that has never established an identity.
+        // Root profile grids can expose only a numeric id before inserting the normal watch href.
+        const numericVideoId = String(
+            card.getAttribute && (card.getAttribute('data-video-id') || card.getAttribute('data-id')) || ''
+        ).trim();
+        if (/^\d+$/.test(numericVideoId)) {
+            addCandidate(fallbackCandidates, fallbackSeen, `/video.${numericVideoId}/`, 900, order++);
+        }
+
         ['data-href', 'data-url', 'data-video-url'].forEach(attribute => {
             if (card.hasAttribute && card.hasAttribute(attribute)) {
                 addCandidate(fallbackCandidates, fallbackSeen, card.getAttribute(attribute), 800, order++);
@@ -1793,7 +2325,10 @@ ${searchableValue}`);
             '.thumb-inside > a[href]',
             '.thumb-inside a[href]',
             'a[href][data-video-url]',
-            'a[href][data-id]'
+            'a[href][data-id]',
+            // Search/tag/profile grids sometimes use a plain anchor with none of the homepage classes.
+            // normalizeVideoWatchUrl() keeps this broad fallback limited to genuine XVideos watch URLs.
+            'a[href]'
         ];
 
         fallbackSelectors.forEach((selector, selectorIndex) => {
@@ -1826,7 +2361,8 @@ ${searchableValue}`);
         // hover-preview nodes inside the same .thumb-block; including every anchor or preview label
         // made a previously clean card look "new" every time the mouse crossed it.
         const stableTitleSelectors = [
-            '.thumb-title a', 'a.thumb-title', '.thumb-title', '.video-title'
+            '.thumb-title a', 'a.thumb-title', '.thumb-title',
+            '.thumb-under .title a', '.title a', '.video-title'
         ].join(', ');
         const stablePeopleSelectors = [
             '.username', '.user-profile-name', '.uploader', '.main-uploader',
@@ -1859,12 +2395,31 @@ ${searchableValue}`);
                 '[class*="preview"], [class*="hover"]'
             )) return;
 
-            addValue(link.textContent || '');
+            addValue(link.innerText || '');
             try {
                 const parsed = new URL(link.getAttribute('href') || '', window.location.origin);
                 const slug = parsed.pathname.split('/').filter(Boolean).pop() || '';
                 addValue(decodeURIComponent(slug).replace(/[-_]+/g, ' '));
             } catch (e) {}
+        });
+
+        // Newer subpage grids may put the title directly on a plain watch-page anchor. Read its
+        // persistent label/attributes even when none of the historical .thumb-title classes exist.
+        card.querySelectorAll('a[href]').forEach(link => {
+            if (link.closest && link.closest(
+                '.video-overlay-title, .videoad-title, .sheer-sponsor, video, ' +
+                '[class*="preview"], [class*="hover"]'
+            )) return;
+            const watchUrl = normalizeVideoWatchUrl(link.getAttribute('href') || '');
+            if (!watchUrl) return;
+            // Do not fall back to textContent here. Language-page thumbnail anchors contain an
+            // inline hydration <script>; its querySelector("#video-thumb-…") source was matching
+            // the shared /#/ rule and falsely blocking every card on /lang/.
+            addValue(link.innerText || '');
+            addValue(link.getAttribute('title'));
+            addValue(link.getAttribute('aria-label'));
+            addValue(link.getAttribute('data-title'));
+            addValue(link.getAttribute('data-video-title'));
         });
 
         const normalizedUrl = normalizeVideoWatchUrl(videoUrl);
@@ -1882,7 +2437,8 @@ ${searchableValue}`);
         if (!card || !card.querySelectorAll) return false;
 
         const evidenceSelectors = [
-            '.thumb-title a', 'a.thumb-title', '.thumb-title', 'a.video-title',
+            '.thumb-title a', 'a.thumb-title', '.thumb-title',
+            '.thumb-under .title a', '.title a', 'a.video-title',
             '.username', '.user-profile-name', '.uploader', '.main-uploader',
             '.uploader-tag .name', '.model', '.models', '.model-name',
             '[data-title]', '[data-video-title]', '[data-uploader]',
@@ -1922,6 +2478,24 @@ ${searchableValue}`);
             if (link.closest && link.closest('[class*="preview"], [class*="hover"], .video-overlay-title')) continue;
             const href = link.getAttribute('href') || '';
             if (href.split('/').filter(Boolean).length >= 2) return true;
+        }
+
+        // Plain watch links are sufficient evidence on search/tag/profile layouts even when the
+        // title wrapper class differs from the homepage markup.
+        for (const link of card.querySelectorAll('a[href]')) {
+            if (link.closest && link.closest(
+                '.video-overlay-title, .videoad-title, .sheer-sponsor, video, ' +
+                '[class*="preview"], [class*="hover"]'
+            )) continue;
+            if (!normalizeVideoWatchUrl(link.getAttribute('href') || '')) continue;
+            const label = [
+                link.textContent || '',
+                link.getAttribute('title') || '',
+                link.getAttribute('aria-label') || '',
+                link.getAttribute('data-title') || '',
+                link.getAttribute('data-video-title') || ''
+            ].join(' ').replace(/\s+/g, ' ').trim();
+            if (label.length >= 2) return true;
         }
 
         return false;
@@ -2152,6 +2726,24 @@ ${searchableValue}`);
         }
     }
 
+    function cancelVideoPageFetchWorkForRoute(reason) {
+        videoPageAbortControllers.forEach(controller => {
+            try { controller.abort(); } catch (e) {}
+        });
+        videoPageAbortControllers.clear();
+
+        videoPageFetchQueue.splice(0, videoPageFetchQueue.length).forEach(job => {
+            videoPageFetchJobsByUrl.delete(job.url);
+            try { job.resolve(''); } catch (e) {}
+        });
+        videoPageFetchJobsByUrl.clear();
+        videoPageMetadataPending.clear();
+
+        if (reason) {
+            try { console.debug('BraveFox: Cancelled stale video-page fetch work:', reason); } catch (e) {}
+        }
+    }
+
     function getVideoPageMetadata(url, source) {
         const cached = videoPageMetadataCache.get(url);
         if (cached) {
@@ -2233,12 +2825,20 @@ ${searchableValue}`);
     function scheduleVideoResultCardRetry(card) {
         if (!card || !card.isConnected) return;
         const retries = Number.parseInt(card.getAttribute(VIDEO_RESULT_PENDING_RETRY_ATTR) || '0', 10) || 0;
-        if (retries >= VIDEO_RESULT_MAX_PENDING_RETRIES) {
-            // A malformed card with no canonical video identity must not hold an entire batch open.
-            // Fail closed: keep it hidden and allow the remaining approved cards to commit together.
-            setVideoResultCardState(card, 'prepared-blocked', 'Missing stable video identity');
-            queuedVideoResultCards.add(card);
-            scheduleVideoBatchPass(0);
+        const retryLimit = isFiniteProfileVideoTabRoute()
+            ? Math.max(VIDEO_RESULT_MAX_PENDING_RETRIES, 30)
+            : VIDEO_RESULT_MAX_PENDING_RETRIES;
+        if (retries >= retryLimit) {
+            // A malformed card with no canonical video identity is not useful/clickable. On immediate
+            // routes settle it as blocked; homepage batching keeps its existing prepared verdict.
+            if (shouldRevealVideoCardsIndividually()) {
+                setVideoResultCardState(card, 'blocked', 'Missing stable video identity');
+                syncVideoBatchPendingPageState();
+            } else {
+                setVideoResultCardState(card, 'prepared-blocked', 'Missing stable video identity');
+                queuedVideoResultCards.add(card);
+                scheduleVideoBatchPass(0);
+            }
             return;
         }
 
@@ -2247,6 +2847,47 @@ ${searchableValue}`);
             if (!card.isConnected) return;
             queueVideoResultCard(card, 'identity-retry');
         }, VIDEO_RESULT_PENDING_RETRY_MS * Math.min(retries + 1, 6));
+    }
+
+    function settleImmediateVideoResultCard(card, state, videoUrl, localHash, evidence) {
+        if (!card || !card.isConnected) return;
+        if (videoUrl) routeCommittedVideoUrls.add(videoUrl);
+        card.setAttribute(VIDEO_RESULT_LOCAL_HASH_ATTR, localHash || '');
+        setVideoResultCardState(card, state, evidence || '');
+        if (videoUrl) rememberVideoVerdict(videoUrl, state, localHash || '', evidence || '');
+        videoBatchInitialCommitted = true;
+        hideInitialVideoGuard('individual-card-settled');
+        syncVideoBatchPendingPageState();
+    }
+
+    function prepareImmediateVideoResultCard(card, videoUrl, localText, localHash) {
+        const cached = getCachedVideoVerdict(videoUrl, localHash, localText);
+        if (cached) {
+            settleImmediateVideoResultCard(
+                card,
+                cached.state === 'blocked' ? 'blocked' : 'clean',
+                videoUrl,
+                localHash,
+                cached.title || localText
+            );
+            return;
+        }
+
+        if (containsBlockedContent(localText)) {
+            settleImmediateVideoResultCard(card, 'blocked', videoUrl, localHash, localText);
+            return;
+        }
+
+        if (!videoUrl) {
+            setVideoResultCardState(card, 'checking', localText);
+            scheduleVideoResultCardRetry(card);
+            return;
+        }
+
+        // The card already exposes the title/uploader/watch slug needed by the regex scanner. Do not
+        // fetch every linked video page: those requests were the reason profiles and tag/search pages
+        // stayed loading for ages. The card is still hidden until this local verdict is complete.
+        settleImmediateVideoResultCard(card, 'clean', videoUrl, localHash, localText);
     }
 
     function queueVideoResultCard(card, source) {
@@ -2311,6 +2952,13 @@ ${searchableValue}`);
 
         card.setAttribute(VIDEO_RESULT_SOURCE_ATTR, videoUrl);
         card.setAttribute(VIDEO_RESULT_LOCAL_HASH_ATTR, localHash);
+
+        if (shouldRevealVideoCardsIndividually()) {
+            queuedVideoResultCards.delete(card);
+            deferredVideoTailCards.delete(card);
+            prepareImmediateVideoResultCard(card, videoUrl, localText, localHash);
+            return;
+        }
 
         // Cached URLs skip all network work, but a clean result still respects the current route's
         // row gate. Only a URL already committed on this route is restored immediately after a DOM
@@ -2653,6 +3301,7 @@ ${searchableValue}`);
     }
 
     function scheduleCommittedVideoRowRepair(reason) {
+        if (shouldRevealVideoCardsIndividually()) return;
         if (!videoBatchInitialCommitted || videoBatchRowRepairScheduled || videoBatchRowRepairInProgress) return;
         videoBatchRowRepairScheduled = true;
         const run = () => {
@@ -2797,17 +3446,25 @@ ${searchableValue}`);
         // card, otherwise that earlier card could appear above the committed rows after settling.
         const selectedCleanCards = [];
         let prefixReady = true;
-        for (const card of cards) {
-            if (!card || !card.isConnected) continue;
-            const state = card.getAttribute(VIDEO_RESULT_STATE_ATTR) || '';
-            if (state === 'prepared-blocked') continue;
-            if (state === 'prepared-clean') {
-                selectedCleanCards.push(card);
-                if (selectedCleanCards.length >= cleanCommitCount) break;
-                continue;
+        if (cleanCommitCount === 0) {
+            prefixReady = cards.every(card => {
+                if (!card || !card.isConnected) return true;
+                const state = card.getAttribute(VIDEO_RESULT_STATE_ATTR) || '';
+                return state === 'prepared-clean' || state === 'prepared-blocked';
+            });
+        } else {
+            for (const card of cards) {
+                if (!card || !card.isConnected) continue;
+                const state = card.getAttribute(VIDEO_RESULT_STATE_ATTR) || '';
+                if (state === 'prepared-blocked') continue;
+                if (state === 'prepared-clean') {
+                    selectedCleanCards.push(card);
+                    if (selectedCleanCards.length >= cleanCommitCount) break;
+                    continue;
+                }
+                prefixReady = false;
+                break;
             }
-            prefixReady = false;
-            break;
         }
 
         if (!prefixReady || selectedCleanCards.length !== cleanCommitCount) {
@@ -2900,11 +3557,15 @@ ${searchableValue}`);
         const states = activeVideoBatchCards.map(card => card.getAttribute(VIDEO_RESULT_STATE_ATTR) || '');
         const cleanCount = states.reduce((count, state) => count + (state === 'prepared-clean' ? 1 : 0), 0);
         const unresolved = states.some(state => state !== 'prepared-clean' && state !== 'prepared-blocked');
-        const isInitialBatch = !!activeVideoBatchReleaseInitialGuard || !videoBatchInitialCommitted;
+        const noVisibleCommittedCardsYet = getCommittedCleanVideoCardsInDomOrder().length === 0;
+        const isInitialBatch = !!activeVideoBatchReleaseInitialGuard ||
+            !videoBatchInitialCommitted ||
+            noVisibleCommittedCardsYet;
         const finiteProfileTab = isFiniteProfileVideoTabRoute();
         const elapsed = Date.now() - activeVideoBatchStartedAt;
         const finiteRouteQuiet = Date.now() - videoBatchLastCardDiscoveryAt >= VIDEO_PROFILE_TAB_DOM_QUIET_MS;
-        const queuedOutsideActive = finiteProfileTab ? collectQueuedVideoCardsInDomOrder().length : 0;
+        const listingRouteQuiet = Date.now() - videoBatchLastCardDiscoveryAt >= VIDEO_LISTING_DOM_QUIET_MS;
+        const queuedOutsideActive = collectQueuedVideoCardsInDomOrder().length;
         ensureVideoLookaheadPipeline(isInitialBatch ? 'initial-halfway' : 'active-halfway');
 
         // Normal listings keep eight-row preferred commits and four-row slow fallbacks. Profile,
@@ -2918,6 +3579,16 @@ ${searchableValue}`);
         } else if (isInitialBatch) {
             if (cleanCount >= activeVideoBatchTargetCleanCount) {
                 commitCleanCount = activeVideoBatchTargetCleanCount;
+            } else if (
+                !unresolved &&
+                queuedOutsideActive === 0 &&
+                listingRouteQuiet &&
+                elapsed >= VIDEO_BATCH_FILL_WAIT_MS
+            ) {
+                // Search/category/listing pages can expose only 20–39 mounted cards, or fewer than
+                // forty approved cards after filtering. Commit every settled clean card together
+                // rather than leaving the entire route permanently collapsed.
+                commitCleanCount = cleanCount;
             }
         } else if (videoBatchNextBatchRequested) {
             if (cleanCount >= VIDEO_BATCH_PREFERRED_CARDS) {
@@ -3087,6 +3758,15 @@ ${searchableValue}`);
                     return;
                 }
 
+                if (routeAge >= VIDEO_EMPTY_GRID_WATCH_MS && quietFor >= VIDEO_LISTING_DOM_QUIET_MS) {
+                    // Empty search/category/watch grids can still receive late cards through the SPA
+                    // observer. Mark the opening phase complete now so a missing grid cannot spin forever.
+                    videoBatchInitialCommitted = true;
+                    hideInitialVideoGuard('empty-grid-timeout');
+                    syncVideoBatchPendingPageState();
+                    return;
+                }
+
                 scheduleVideoBatchPass(listingGuardTimedOut ? 250 : 120);
                 return;
             }
@@ -3107,6 +3787,15 @@ ${searchableValue}`);
             }
 
             if (queuedCards.length < targetCards && !listingGuardTimedOut) {
+                const shortListingReady = !onWatchPage &&
+                    routeAge >= VIDEO_LISTING_HYDRATION_GRACE_MS &&
+                    quietFor >= VIDEO_LISTING_DOM_QUIET_MS;
+
+                if (shortListingReady) {
+                    processVideoCardBatch(queuedCards.length, true, 'quiet-short-listing-initial');
+                    return;
+                }
+
                 scheduleVideoBatchPass(120);
                 return;
             }
@@ -3137,6 +3826,15 @@ ${searchableValue}`);
     }
 
     function scheduleVideoBatchPass(delay) {
+        if (isLeanXVideosListingRoute()) {
+            if (videoBatchPassTimer !== null) {
+                clearTimeout(videoBatchPassTimer);
+                videoBatchPassTimer = null;
+            }
+            syncVideoBatchPendingPageState();
+            return;
+        }
+
         const wait = Number.isFinite(delay) ? Math.max(0, delay) : VIDEO_BATCH_SETTLE_MS;
         if (videoBatchPassTimer !== null) clearTimeout(videoBatchPassTimer);
         videoBatchPassTimer = setTimeout(runVideoBatchPass, wait);
@@ -3150,6 +3848,7 @@ ${searchableValue}`);
 
         disconnectVideoBatchBottomObserver();
         disconnectVideoCardMediaObserver();
+        cancelVideoPageFetchWorkForRoute(source || 'route-change');
         resetVideoLookaheadPipeline(source || 'route-change');
         queuedVideoResultCards.clear();
         deferredVideoTailCards.clear();
@@ -3177,7 +3876,7 @@ ${searchableValue}`);
         initialVideoGuardTimedOutRouteUrl = '';
 
         if (shouldUseFullInitialVideoGuard()) showInitialVideoGuard(source || 'route-change');
-        else hideInitialVideoGuard('watch-route');
+        else hideInitialVideoGuard('non-home-route');
 
         document.querySelectorAll(VIDEO_RESULT_CARD_SELECTOR).forEach(card => {
             queueVideoResultCard(card, source || 'route-change');
@@ -3221,13 +3920,66 @@ ${searchableValue}`);
         ensureVideoBatchViewportPoll();
     }
 
+    function releaseMisclassifiedProfileDirectoryTiles() {
+        if (!isProfileDirectoryRoute()) return;
+
+        try {
+            document.querySelectorAll(XVIDEOS_GENERIC_THUMB_BLOCK_SELECTOR).forEach(tile => {
+                if (!tile || !tile.isConnected || tile.matches(VIDEO_RESULT_CARD_SELECTOR)) return;
+                if (!tile.querySelector(
+                    'a[href^="/profiles/"], a[href^="/pornstars/"], ' +
+                    'a[href^="/channels/"], a[href^="/model-channels/"]'
+                )) return;
+
+                unobserveVideoCardMedia(tile);
+                queuedVideoResultCards.delete(tile);
+                deferredVideoTailCards.delete(tile);
+                [
+                    VIDEO_RESULT_STATE_ATTR,
+                    VIDEO_RESULT_SOURCE_ATTR,
+                    VIDEO_RESULT_REVISION_ATTR,
+                    VIDEO_RESULT_LOCAL_HASH_ATTR,
+                    VIDEO_RESULT_PENDING_RETRY_ATTR,
+                    VIDEO_RESULT_COMMITTED_ATTR,
+                    VIDEO_CARD_MEDIA_FROZEN_ATTR,
+                    'aria-hidden'
+                ].forEach(attribute => tile.removeAttribute(attribute));
+            });
+        } catch (e) {
+            console.log('Error releasing profile-directory tiles: ' + e.message);
+        }
+    }
+
     function filterVideoResultCard(card) {
         queueVideoResultCard(card, 'filter-pass');
     }
 
+    function isLikelyProfileVideoShell(card) {
+        if (!card || !card.matches || !card.matches(XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR)) return false;
+        if (card.matches('.premium-search-on-free')) return false;
+        if (card.matches(VIDEO_RESULT_CARD_SELECTOR)) return true;
+
+        const id = String(card.getAttribute('data-video-id') || card.getAttribute('data-id') || '').trim();
+        if (/^\d+$/.test(id)) return true;
+        if (/^video_/i.test(card.id || '')) return true;
+
+        return !!card.querySelector('.thumb-inside, .thumb-under, .thumb, img');
+    }
+
+    function collectVideoResultCardsForCurrentRoute() {
+        const cards = new Set(document.querySelectorAll(VIDEO_RESULT_CARD_SELECTOR));
+        if (isFiniteProfileVideoTabRoute()) {
+            document.querySelectorAll(XVVIDEOS_PROFILE_VIDEO_SHELL_SELECTOR).forEach(card => {
+                if (isLikelyProfileVideoShell(card)) cards.add(card);
+            });
+        }
+        return cards;
+    }
+
     function filterVideoResultCards() {
         try {
-            document.querySelectorAll(VIDEO_RESULT_CARD_SELECTOR).forEach(card => {
+            releaseMisclassifiedProfileDirectoryTiles();
+            collectVideoResultCardsForCurrentRoute().forEach(card => {
                 const state = card.getAttribute(VIDEO_RESULT_STATE_ATTR) || '';
                 const committed = card.getAttribute(VIDEO_RESULT_COMMITTED_ATTR) === 'true';
                 const currentRevision = card.getAttribute(VIDEO_RESULT_REVISION_ATTR) === String(videoFilterRevision);
@@ -3247,10 +3999,151 @@ ${searchableValue}`);
         }
     }
 
+    // Remove RED/Premium promo rows and links while preserving the ordinary Free tab.
+    // This runs during the initial pass and every SPA mutation pass; the document-start CSS above
+    // prevents even a one-frame flash before these nodes are physically removed.
+    function removeXVideosPremiumPromos() {
+        try {
+            document.querySelectorAll(XVVIDEOS_PREMIUM_TABS_SELECTOR).forEach(tabs => {
+                if (!tabs || !tabs.isConnected) return;
+
+                tabs.querySelectorAll('li').forEach(listItem => {
+                    const link = listItem.querySelector('a[href]');
+                    const href = link ? (link.getAttribute('href') || '') : '';
+                    const isPremiumTab = /\/c\/p:\d+(?:\/|$)/i.test(href) ||
+                        /#_tabred(?:$|[?&])/i.test(href) ||
+                        !!listItem.querySelector(
+                            '.icf-ticket-red, .red-ticket, ' +
+                            'a.xv-slim-tab-btn.tab-button.premium[title="RED"]'
+                        );
+
+                    if (isPremiumTab) listItem.remove();
+                });
+
+                const freeLink = Array.from(tabs.querySelectorAll('a[href]')).find(link => {
+                    const href = link.getAttribute('href') || '';
+                    return /^\/c\/(?!p:)/i.test(href);
+                });
+
+                if (freeLink) {
+                    tabs.querySelectorAll('a.active').forEach(link => {
+                        if (link !== freeLink) link.classList.remove('active');
+                    });
+                    freeLink.classList.add('active');
+                    freeLink.setAttribute('aria-current', 'page');
+                }
+
+                if (!tabs.querySelector('li')) tabs.remove();
+            });
+
+            document.querySelectorAll(XVVIDEOS_PREMIUM_PROMO_SELECTOR).forEach(element => {
+                if (!element || !element.isConnected) return;
+
+                const profileRedTab = element.matches && element.matches(
+                    'a.xv-slim-tab-btn.tab-button.premium[title="RED"], ' +
+                    'a.tab-button.premium[title="RED"], a[href*="#_tabRed"]'
+                );
+                if (profileRedTab) {
+                    const tabItem = element.closest && element.closest('li');
+                    if (tabItem) tabItem.remove();
+                    else element.remove();
+                    return;
+                }
+
+                const redBanner = element.closest && element.closest('.banner-slider.with-website-link');
+                if (redBanner && (
+                    element.matches?.('a.banner-goto-redtab, a[href*="#_tabRed"]') ||
+                    redBanner.querySelector('a.banner-goto-redtab, a[href*="#_tabRed"]')
+                )) {
+                    redBanner.remove();
+                    return;
+                }
+
+                const tabItem = element.closest && element.closest('ul.search-premium-tabs > li');
+                if (tabItem) {
+                    tabItem.remove();
+                    return;
+                }
+
+                element.remove();
+            });
+
+            if (isProfileEntityRoute() || isRootSlugProfileRoute()) {
+                document.querySelectorAll('.banner-slider.with-website-link').forEach(banner => {
+                    if (!banner || !banner.isConnected) return;
+                    if (banner.querySelector('a.banner-goto-redtab, a[href*="#_tabRed"]') ||
+                        !(banner.textContent || '').trim()) {
+                        banner.remove();
+                    }
+                });
+            }
+        } catch (e) {
+            console.log('Error removing XVideos RED/Premium promos: ' + e.message);
+        }
+    }
+
+    function removeXVideosProfileTransButtons() {
+        if (!isProfileEntityRoute() && !isRootSlugProfileRoute()) return;
+        try {
+            const links = new Set(document.querySelectorAll(XVVIDEOS_PROFILE_TRANS_BUTTON_SELECTOR));
+            document.querySelectorAll(XVVIDEOS_PROFILE_TRANS_ICON_SELECTOR).forEach(icon => {
+                const link = icon.closest && icon.closest('a');
+                if (link) links.add(link);
+            });
+
+            links.forEach(link => {
+                if (!link || !link.isConnected) return;
+                const href = link.getAttribute && (link.getAttribute('href') || '') || '';
+                if (!/\/shemale(?:\/|#|\?|$)/i.test(href) && !link.querySelector(XVVIDEOS_PROFILE_TRANS_ICON_SELECTOR)) return;
+
+                const listItem = link.closest && link.closest('li');
+                if (listItem && listItem.querySelectorAll('a').length <= 1) listItem.remove();
+                else link.remove();
+            });
+        } catch (e) {
+            console.log('Error removing XVideos Trans profile buttons: ' + e.message);
+        }
+    }
+
+    function freezeStraightOrientationButton() {
+        try {
+            const candidates = new Set(document.querySelectorAll(XVVIDEOS_ORIENTATION_BUTTON_SELECTOR));
+
+            // Fallback only when XVideos changes the known IDs/classes. Do not rescan every header
+            // button during ordinary mutation passes once the real control has been found.
+            if (candidates.size === 0) {
+                document.querySelectorAll('button.head__choice').forEach(button => {
+                    const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+                    const label = `${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`;
+                    if (/\bstraight\b/i.test(`${text} ${label}`)) candidates.add(button);
+                });
+            }
+
+            candidates.forEach(button => {
+                if (!button || !button.isConnected) return;
+                const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+                const label = `${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''}`;
+                if (!/\bstraight\b/i.test(`${text} ${label}`)) return;
+
+                if (button.getAttribute('data-bravefox-static-orientation') !== 'true') {
+                    button.setAttribute('data-bravefox-static-orientation', 'true');
+                }
+                if (button.getAttribute('aria-disabled') !== 'true') button.setAttribute('aria-disabled', 'true');
+                if (button.getAttribute('tabindex') !== '-1') button.setAttribute('tabindex', '-1');
+                button.querySelectorAll(
+                    '.caret, [class*="caret"], [class*="chevron"], .icf-angle-down, .icf-caret-down'
+                ).forEach(arrow => arrow.remove());
+            });
+        } catch (e) {
+            console.log('Error freezing XVideos orientation button: ' + e.message);
+        }
+    }
+
     // Remove unwanted top-level menu buttons everywhere, including menus injected after
     // initial load or rebuilt during XVideos SPA-style navigation.
     function removeUnwantedXVideosMenuButtons() {
         try {
+            freezeStraightOrientationButton();
             document.querySelectorAll(XVVIDEOS_MAIN_CATEGORY_BUTTON_SELECTOR).forEach(button => {
                 if (!button || !button.isConnected) return;
 
@@ -3286,19 +4179,65 @@ ${searchableValue}`);
 
     // Remove the complete clickable sponsor overlay, not merely its text. The class-based
     // selector catches the same player element even if its destination stops being sheer.com.
+    // Only the promo anchor/payload is removed; `.top-right` stays because it also owns real controls.
+    function removeExternalVideoOverlayLinksFromNode(root) {
+        const element = root && root.nodeType === Node.ELEMENT_NODE ? root : null;
+        if (!element) return 0;
+
+        let removed = 0;
+        const links = new Set();
+        if (element.matches && element.matches(VIDEO_OVERLAY_LINK_SELECTOR)) links.add(element);
+        if (element.querySelectorAll) {
+            element.querySelectorAll(VIDEO_OVERLAY_LINK_SELECTOR).forEach(link => links.add(link));
+        }
+        links.forEach(link => {
+            if (!link || !link.isConnected) return;
+            link.remove();
+            removed++;
+        });
+
+        const orphanSelector = '.video-overlay-title-txt, .video-overlay-title-icon';
+        const payloads = new Set();
+        if (element.matches && element.matches(orphanSelector)) payloads.add(element);
+        if (element.querySelectorAll) element.querySelectorAll(orphanSelector).forEach(node => payloads.add(node));
+        payloads.forEach(node => {
+            if (node && node.isConnected && !node.closest('a')) {
+                node.remove();
+                removed++;
+            }
+        });
+        return removed;
+    }
+
     function removeExternalVideoOverlayLinks() {
         try {
-            document.querySelectorAll(VIDEO_OVERLAY_LINK_SELECTOR).forEach(link => {
-                if (link && link.isConnected) link.remove();
-            });
-
-            // Clean up orphan payload nodes if the site mounts them separately.
-            document.querySelectorAll('.video-overlay-title-txt, .video-overlay-title-icon').forEach(element => {
-                if (!element.closest('a') && element.isConnected) element.remove();
-            });
+            removeExternalVideoOverlayLinksFromNode(document.documentElement);
         } catch (e) {
             console.log('Error removing external video overlay links: ' + e.message);
         }
+    }
+
+    function ensureVideoOverlayObserver() {
+        const root = document.documentElement;
+        if (!root) {
+            setTimeout(ensureVideoOverlayObserver, 50);
+            return;
+        }
+
+        if (!videoOverlayObserver) {
+            videoOverlayObserver = new MutationObserver(records => {
+                records.forEach(record => {
+                    record.addedNodes.forEach(node => removeExternalVideoOverlayLinksFromNode(node));
+                });
+            });
+            observerInstances.add(videoOverlayObserver);
+        }
+
+        videoOverlayObserver.observe(root, {
+            childList: true,
+            subtree: true
+        });
+        removeExternalVideoOverlayLinks();
     }
 
     // Function to hide elements containing blocked regex matches
@@ -3309,8 +4248,7 @@ ${searchableValue}`);
             const elements = document.querySelectorAll(
                 '.thumb-title a, .title a, .username, .user-profile-name, .thumb-block, .thumb, .thumb-inside, .video-title, ' +
                 'li.model:nth-of-type(2), .hover-name.uploader-tag.main.label.btn-default.btn > .name, .hover-name.uploader-tag.main.label.btn-default.btn, ' +
-                '.main-uploader, .cropped.ordered-label-list.video-tags-list.video-metadata, .thumb-under > .metadata > .bg a > .name, ' +
-                '.thumb-under > .metadata > .bg a, .cropped.ordered-label-list.video-tags-list.video-metadata > ul, .btn-default.btn.is-keyword'
+                '.main-uploader, .thumb-under > .metadata > .bg a > .name, .thumb-under > .metadata > .bg a'
             );
 
             elements.forEach(element => {
@@ -3324,7 +4262,7 @@ ${searchableValue}`);
                     const parentElement = element.closest(
                         '.thumb-block, .thumb, .thumb-inside, .video-title, ' +
                         'li.model:nth-of-type(2), .hover-name.uploader-tag.main.label.btn-default.btn, .main-uploader, ' +
-                        '.cropped.ordered-label-list.video-tags-list.video-metadata, .metadata .bg'
+                        '.metadata .bg'
                     );
                     if (parentElement) {
                         parentElement.style.setProperty('display', 'none', 'important');
@@ -3362,6 +4300,7 @@ ${searchableValue}`);
                 const bodyClass = document.body.className;
                 if (bodyClass.includes('home')) {
                     console.log("On the home page. Performing home page specific actions.");
+                    removeXVideosPremiumPromos();
                     removeUnwantedXVideosMenuButtons();
                     filterSearchAutocompleteEntries();
                     filterVideoResultCards();
@@ -3407,8 +4346,13 @@ ${searchableValue}`);
     // infinite-scroll mounts, and content recycling.
 
     function runCompleteFilterPass() {
+        syncXVideosProfileVideoTabState();
         injectNoGlimpseCSS();
         syncTagsPageNoGlimpseState();
+        syncWatchPageTagNoGlimpseState();
+        removeXVideosPremiumPromos();
+        removeXVideosProfileTransButtons();
+        releaseMisclassifiedProfileDirectoryTiles();
         removeUnwantedXVideosMenuButtons();
         removeExternalVideoOverlayLinks();
         filterSearchAutocompleteEntries();
@@ -3417,6 +4361,7 @@ ${searchableValue}`);
         checkAndRedirectUrlBlockedContent();
         removeBlockedCategoryEntries();
         filterTagsPageLinks();
+        filterWatchPageKeywordTags();
         hideBlockedContent();
         deleteContent();
         handleHomePage();
@@ -3453,12 +4398,14 @@ ${searchableValue}`);
         const generation = spaRouteGeneration;
         clearSpaFollowUpTimers();
         invalidateRouteScopedState();
+        syncXVideosProfileVideoTabState();
+        syncWatchPageTagNoGlimpseState();
         resetVideoBatchForRoute(source || 'route-change');
 
         // Profile/channel video tabs can hydrate substantially later than ordinary listings.
         runCompleteFilterPass();
         const hydrationDelays = isFiniteProfileVideoTabRoute()
-            ? [0, 60, 180, 500, 1200, 2200, 4000, 7000]
+            ? [0, 60, 180, 500, 1200, 2200, 4000, 7000, 10000]
             : [0, 60, 180, 500, 1200];
         hydrationDelays.forEach(delay => scheduleSpaFollowUp(delay, generation));
         return true;
@@ -3526,7 +4473,8 @@ ${searchableValue}`);
     function isPersistentVideoCardMutationTarget(element) {
         if (!element || !element.closest) return false;
         return !!element.closest(
-            '.thumb-title, a.thumb-title, .video-title, .username, .user-profile-name, ' +
+            '.thumb-title, a.thumb-title, .thumb-under .title, .title, .video-title, ' +
+            '.username, .user-profile-name, ' +
             '.uploader, .main-uploader, .uploader-tag, .model, .models, .model-name, ' +
             '[data-title], [data-video-title], [data-uploader], [data-username], ' +
             '[data-model], [data-models], [data-performer], [data-performers]'
@@ -3544,13 +4492,24 @@ ${searchableValue}`);
     function processSpaMutations(records) {
         // DOM activity doubles as an isolated-world route detector.
         detectSpaLocationChange('dom');
+        syncXVideosProfileVideoTabState();
         injectNoGlimpseCSS();
         syncTagsPageNoGlimpseState();
+        syncWatchPageTagNoGlimpseState();
+        removeXVideosPremiumPromos();
+        removeXVideosProfileTransButtons();
+        releaseMisclassifiedProfileDirectoryTiles();
 
         const cards = new Set();
         let needsBroadPass = false;
 
         records.forEach(record => {
+            if (record.type === 'childList') {
+                record.addedNodes.forEach(node => removeExternalVideoOverlayLinksFromNode(node));
+            } else if (record.type === 'attributes') {
+                removeExternalVideoOverlayLinksFromNode(record.target);
+            }
+
             const targetElement = record.target && record.target.nodeType === Node.ELEMENT_NODE
                 ? record.target
                 : record.target && record.target.parentElement;
@@ -3630,10 +4589,13 @@ ${searchableValue}`);
         cards.forEach(filterVideoResultCard);
 
         if (needsBroadPass) {
+            removeXVideosPremiumPromos();
+            removeXVideosProfileTransButtons();
             removeUnwantedXVideosMenuButtons();
             removeExternalVideoOverlayLinks();
             filterSearchAutocompleteEntries();
             filterTagsPageLinks();
+            filterWatchPageKeywordTags();
 
             if (spaBroadMutationTimer === null) {
                 spaBroadMutationTimer = setTimeout(() => {
@@ -3719,6 +4681,7 @@ ${searchableValue}`);
     }
 
     function startSpaRuntime() {
+        ensureVideoOverlayObserver();
         ensureSpaRootObserver();
         installVideoBatchViewportHooks();
 
@@ -3765,7 +4728,7 @@ ${searchableValue}`);
     const startupGeneration = spaRouteGeneration;
     runCompleteFilterPass();
     const startupHydrationDelays = isFiniteProfileVideoTabRoute()
-        ? [0, 60, 180, 500, 1200, 2200, 4000, 7000]
+        ? [0, 60, 180, 500, 1200, 2200, 4000, 7000, 10000]
         : [0, 60, 180, 500, 1200];
     startupHydrationDelays.forEach(delay => scheduleSpaFollowUp(delay, startupGeneration));
 

@@ -1,6 +1,39 @@
 (function() {
     'use strict';
 
+    // === BRAVEFOX COMPLETE SITE EXCLUSIONS ===
+    // These sites must run exactly as if BraveFox Enhancer were disabled.
+    function braveFoxIsCompletelyExcludedSite() {
+        const hosts = [];
+        const addHost = value => {
+            const host = String(value || '').toLowerCase().replace(/\.$/, '');
+            if (host && !hosts.includes(host)) hosts.push(host);
+        };
+
+        try { addHost(window.location.hostname); } catch (e) {}
+        try {
+            const origins = window.location.ancestorOrigins;
+            if (origins) {
+                for (let i = 0; i < origins.length; i++) {
+                    try { addHost(new URL(origins[i]).hostname); } catch (e) {}
+                }
+            }
+        } catch (e) {}
+        try {
+            if (window.top === window) addHost(window.location.hostname);
+            else addHost(window.top.location.hostname);
+        } catch (e) {}
+
+        return hosts.some(host =>
+            host === 'is.fi' || host.endsWith('.is.fi') ||
+            host === 'iltalehti.fi' || host.endsWith('.iltalehti.fi') ||
+            /^translate\.google\./i.test(host)
+        );
+    }
+
+    if (braveFoxIsCompletelyExcludedSite()) return;
+
+
     // BraveFox Enhancer v25.4.0 - Images/WebP-AVIF fallback helper
     // Goal:
     // - Keep the normal browser "Save image as..." workflow intact.

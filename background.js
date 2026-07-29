@@ -2,7 +2,21 @@
 // BraveFox Enhancer "background.js" on Chromium platform
 
 // You can change this path if your internal page lives elsewhere:
-const EXT_PAGE = 'html/password-protected.html'; 
+const EXT_PAGE = 'html/password-protected.html';
+
+// Sites on which BraveFox Enhancer must behave as fully disabled.
+function isBraveFoxCompletelyExcludedUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    try {
+        const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+        return host === 'is.fi' || host.endsWith('.is.fi') ||
+               host === 'iltalehti.fi' || host.endsWith('.iltalehti.fi') ||
+               /^translate\.google\./i.test(host);
+    } catch (_) {
+        return false;
+    }
+}
+ 
 
 const timestamp = new Date()
     .toLocaleTimeString('fi-FI', { hour: 'numeric', minute: '2-digit', hourCycle: 'h23' })
@@ -198,7 +212,7 @@ const isHistoryAutoClearHostname = (hostname) => {
 };
 
 const isHistoryAutoClearUrl = (url) => {
-    if (!url || typeof url !== 'string') return false;
+    if (!url || typeof url !== 'string' || isBraveFoxCompletelyExcludedUrl(url)) return false;
     try {
         const parsedUrl = new URL(url);
         return (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') &&
@@ -1255,7 +1269,7 @@ const getHostnameFromUrl = (url) => {
 
 // Check if URL should be blocked (for immediate tab closure)
 const isBlockedUrl = (url) => {
-    if (!url) return false;
+    if (!url || isBraveFoxCompletelyExcludedUrl(url)) return false;
 
     const hostname = getHostnameFromUrl(url);
 
@@ -1337,7 +1351,7 @@ function grantBypass(tabId) {
 
 // NEW: Detect browser extensions OR Dev Console pages we want to protect via redirection
 function isProtectedSystemPageUrl(url) {
-    if (!url || typeof url !== 'string') return false;
+    if (!url || typeof url !== 'string' || isBraveFoxCompletelyExcludedUrl(url)) return false;
     try {
         const lower = url.toLowerCase();
         
@@ -1507,6 +1521,7 @@ const registerEventListeners = () => {
         if (chrome.tabs.onCreated) {
             const onCreatedHandler = (tab) => {
                 try {
+                    if (tab && tab.url && isBraveFoxCompletelyExcludedUrl(tab.url)) return;
                     // Redirect protected system pages immediately on tab creation
                     if (tab.url && isProtectedSystemPageUrl(tab.url)) {
                         if (isBypassed(tab.id)) {
@@ -1537,6 +1552,8 @@ const registerEventListeners = () => {
         if (chrome.tabs.onUpdated) {
             const onUpdatedHandler = (tabId, changeInfo, tab) => {
                 try {
+                    const braveFoxCandidateUrl = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+                    if (isBraveFoxCompletelyExcludedUrl(braveFoxCandidateUrl)) return;
                     // Redirect when a tab navigates to a protected system page
                     const urlIsProtected = changeInfo.url ? isProtectedSystemPageUrl(changeInfo.url) : (tab && tab.url && isProtectedSystemPageUrl(tab.url));
                     if (urlIsProtected) {
@@ -1587,6 +1604,7 @@ const registerEventListeners = () => {
         if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
             const onBeforeNavigateHandler = (details) => {
                 try {
+                    if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
                     if (details.frameId === 0) {
                         // Redirect earliest possible for protected system pages
                         if (isProtectedSystemPageUrl(details.url)) {
@@ -1619,6 +1637,7 @@ const registerEventListeners = () => {
         if (chrome.webNavigation && chrome.webNavigation.onCompleted) {
             const onCompletedHandler = (details) => {
                 try {
+                    if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
                     if (details.frameId === 0 && isProtectedSystemPageUrl(details.url)) {
                         console.log(`Protected page completed for tab ${details.tabId}. Bypass active: ${isBypassed(details.tabId)}`);
                     }
@@ -2482,7 +2501,7 @@ bootManager();
     if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
       chrome.webNavigation.onBeforeNavigate.addListener((details) => {
         try {
-          if (!details || details.frameId !== 0) return;
+          if (!details || details.frameId !== 0 || isBraveFoxCompletelyExcludedUrl(details.url)) return;
           const query = parseGoogleSearchQueryFromUrl(details.url);
           if (query) rememberGoogleQueryContext(details.tabId, details.url, query, 'webNavigation');
         } catch (_) {}
@@ -2495,6 +2514,7 @@ bootManager();
       chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         try {
           const url = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+          if (isBraveFoxCompletelyExcludedUrl(url)) return;
           const query = parseGoogleSearchQueryFromUrl(url);
           if (query) rememberGoogleQueryContext(tabId, url, query, 'tabs.onUpdated');
         } catch (_) {}
