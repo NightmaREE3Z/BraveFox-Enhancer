@@ -162,7 +162,10 @@ const msedgeRegex = /^https?:\/\/([a-z0-9-]+\.)*msedge\.net(\/|$|[?#])/i;
 // Explicit domain allowlist. A base-domain entry also permits its normal subdomains
 // (for example, "xvideos.com" also permits "www.xvideos.com").
 const allowedSites = new Set([
-    "xvideos.com"
+	"xvideos.com",
+	"alastonsuomi.com",
+    	"sieni.us",
+    	"sieni.es"
 ]);
 
 // Dedicated high-priority DNR allow rule. This immediately overrides any older
@@ -187,10 +190,9 @@ const isAllowlistedHostname = (hostname) => {
 // Sites that remain accessible but must never be retained in browser history.
 // A base-domain entry also covers its normal subdomains.
 const historyAutoClearSites = new Set([
-    "xvideos.com",
-    // Covers user.blocksite.co itself, any path/query after .co, and normal
-    // subdomains placed before it (for example foo.user.blocksite.co).
-    "user.blocksite.co"
+	"xvideos.com",
+	"alastonsuomi.com",
+    	"user.blocksite.co"
 ]);
 
 // Bump this key whenever the auto-clear domain set changes so an extension reload
