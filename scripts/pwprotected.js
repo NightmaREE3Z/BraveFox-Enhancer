@@ -9,6 +9,9 @@
   const BRAND_NAME = 'BraveFox Enhancer';
   const ICON_PATH = 'icons/icon48.png';
   const FIXED_PASSWORD = '5u89asyadhy2adhg9uh3572y1';
+  const PAGE_PARAMS = new URLSearchParams(window.location.search);
+  const BLOCKER_MANAGER_TARGET = PAGE_PARAMS.get('target') === 'blocker-manager';
+  const BLOCKER_TARGET = BLOCKER_MANAGER_TARGET;
 
   // Build a minimal full-page scaffold in case the HTML is empty.
   function ensureBase() {
@@ -17,7 +20,9 @@
       document.documentElement.appendChild(body);
     }
     if (!document.title) {
-      document.title = `${BRAND_NAME} — Saatana! Sivu salasanasuojattu.`;
+      document.title = BLOCKER_TARGET
+        ? 'BraveFox Blocker — Saatana! Sivu salasanasuojattu.'
+        : `${BRAND_NAME} — Saatana! Sivu salasanasuojattu.`;
     }
   }
 
@@ -160,7 +165,7 @@
 
     const brand = document.createElement('div');
     brand.className = 'bf-brand';
-    brand.textContent = BRAND_NAME;
+    brand.textContent = BLOCKER_TARGET ? 'BraveFox Blocker' : BRAND_NAME;
 
     topbar.appendChild(logo);
     topbar.appendChild(brand);
@@ -176,7 +181,9 @@
 
     const title = document.createElement('div');
     title.className = 'bf-title';
-    title.textContent = 'Saatana! Sivu salasanasuojattu';
+    title.textContent = BLOCKER_MANAGER_TARGET
+      ? 'BraveFox Blocker salasanasuojattu'
+      : 'Saatana! Sivu salasanasuojattu';
 
     const form = document.createElement('form');
     form.setAttribute('autocomplete', 'off');
@@ -218,32 +225,61 @@
     // Clear existing body and mount our page
     document.body.replaceChildren(page);
 
+    function showIncorrectPassword(message = 'Incorrect password. Try again.') {
+      error.textContent = message;
+      card.animate(
+        [
+          { transform: 'translateX(0)' },
+          { transform: 'translateX(-6px)' },
+          { transform: 'translateX(6px)' },
+          { transform: 'translateX(0)' },
+        ],
+        { duration: 180 }
+      );
+      input.focus();
+      input.select();
+    }
+
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      if (input.value === FIXED_PASSWORD) {
-        // SMART DETECTION: Are we in an iframe or a top-level tab?
-        if (window !== window.parent) {
-            // We are inside the injected content script iframe. Send signal to parent.
-            window.parent.postMessage('BraveFox-Unlock', '*');
-        } else {
-            // We are a top level tab (redirected from Web Store, extensions page, etc)
-            chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
-                chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
-            });
-        }
-      } else {
-        error.textContent = 'Incorrect password. Try again.';
-        card.animate(
-          [
-            { transform: 'translateX(0)' },
-            { transform: 'translateX(-6px)' },
-            { transform: 'translateX(6px)' },
-            { transform: 'translateX(0)' },
-          ],
-          { duration: 180 }
+
+      if (input.value !== FIXED_PASSWORD) {
+        showIncorrectPassword();
+        return;
+      }
+
+      // BraveFox Blocker deliberately reuses this established native password page.
+      if (BLOCKER_MANAGER_TARGET) {
+        submit.disabled = true;
+        input.disabled = true;
+        error.textContent = 'Unlocking BraveFox Blocker…';
+
+        chrome.runtime.sendMessage(
+          { type: 'BFB_UNLOCK', password: input.value },
+          (response) => {
+            const runtimeError = chrome.runtime.lastError;
+            if (runtimeError || !response?.ok || !response?.unlocked) {
+              submit.disabled = false;
+              input.disabled = false;
+              showIncorrectPassword(
+                runtimeError?.message || response?.error || 'BraveFox Blocker could not verify this trusted manager tab. Open it once from the toolbar popup.'
+              );
+              return;
+            }
+
+            window.location.replace(chrome.runtime.getURL('blocker/manager.html'));
+          }
         );
-        input.focus();
-        input.select();
+        return;
+      }
+
+      // Existing BraveFox Enhancer password behavior remains unchanged.
+      if (window !== window.parent) {
+        window.parent.postMessage('BraveFox-Unlock', '*');
+      } else {
+        chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
+          chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
+        });
       }
     });
 
