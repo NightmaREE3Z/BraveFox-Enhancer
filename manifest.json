@@ -1006,8 +1006,7 @@
     {
       "resources": [
         "icons/icon48.png",
-        "html/password-protected.html",
-        "blocker/blocked.html"
+        "html/password-protected.html"
       ],
       "matches": [
         "<all_urls>"
@@ -1021,8 +1020,6 @@
   },
   "incognito": "split",
   "action": {
-    "default_title": "Open BraveFox Blocker",
-    "default_popup": "blocker/popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
