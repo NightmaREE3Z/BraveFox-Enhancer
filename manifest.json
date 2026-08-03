@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "26.4.0",
+  "version": "26.4.1",
   "description": "Makes my everyday Interwebs browsing more peaceful by filtering out content.",
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "permissions": [
-    "storage",
+    "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
+    "storage",
     "history",
     "webNavigation",
     "tabs",
