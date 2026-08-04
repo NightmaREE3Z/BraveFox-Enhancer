@@ -1154,8 +1154,8 @@ const initializeExtension = async () => {
 const updateBlocklist = async () => {
     console.log("Fetching hosts list...");
     const urls = [
-        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/v27-release/hosts/BraveFoxHosts",
-        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/v27-release/hosts/Legacy/legacyFox",
+        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/BraveFoxHosts",
+        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/Legacy/legacyFox",
         "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-porn/hosts"
     ];
 
