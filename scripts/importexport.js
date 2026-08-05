@@ -169,7 +169,18 @@
 
         const text = document.createElement('div');
         text.style.cssText = `font-size: 16px; color: #333; margin-bottom: 24px; line-height: 1.5;`;
-        text.innerHTML = messageHtml.replace(/\*\*(.*?)\*\*/g, '<b style="color: #dc2626; font-size: 18px;">$1</b>');
+        const messageParts = String(messageHtml || '').split(/(\*\*.*?\*\*)/g);
+        for (const part of messageParts) {
+            if (!part) continue;
+            if (part.startsWith('**') && part.endsWith('**')) {
+                const strong = document.createElement('strong');
+                strong.textContent = part.slice(2, -2);
+                strong.style.cssText = 'color: #dc2626; font-size: 18px;';
+                text.appendChild(strong);
+            } else {
+                text.appendChild(document.createTextNode(part));
+            }
+        }
 
         const btnContainer = document.createElement('div');
         btnContainer.style.cssText = `display: flex; justify-content: center; gap: 16px;`;
@@ -536,11 +547,12 @@
 
         const batchSelect = document.createElement('select');
         batchSelect.style.cssText = btnStyle + 'background: transparent; color: #333; cursor: pointer; border-color: #ccc; appearance: auto; padding-right: 10px; margin-right: 4px;';
-        batchSelect.innerHTML = `
-            <option value="4">Small (4)</option>
-            <option value="7">Medium (7)</option>
-            <option value="10">Large (10) </option>
-        `;
+        for (const [value, label] of [['4', 'Small (4)'], ['7', 'Medium (7)'], ['10', 'Large (10)']]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            batchSelect.appendChild(option);
+        }
         batchSelect.value = currentBatchSize.toString(); 
         batchSelect.onchange = (e) => {
             currentBatchSize = parseInt(e.target.value, 10);
@@ -549,7 +561,7 @@
 
         const impLinks = document.createElement('div');
         impLinks.style.cssText = btnStyle + 'color: #616161; border-color: #616161; position: relative;';
-        impLinks.innerHTML = `<div>Import Links</div>`;
+        impLinks.textContent = 'Import Links';
         impLinks.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -575,11 +587,14 @@
 
         const impTerms = document.createElement('div');
         impTerms.style.cssText = btnStyle + 'color: #16a34a; border-color: #16a34a; position: relative;';
-        impTerms.innerHTML = `
-            <div>Import Terms</div>
-            <input type="file" accept=".txt,.csv" style="position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;">
-        `;
-        const fileInput = impTerms.querySelector('input');
+        const impTermsLabel = document.createElement('div');
+        impTermsLabel.textContent = 'Import Terms';
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.txt,.csv';
+        fileInput.style.cssText = 'position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;';
+        impTerms.appendChild(impTermsLabel);
+        impTerms.appendChild(fileInput);
         fileInput.addEventListener('click', e => { e.stopPropagation(); e.stopImmediatePropagation(); });
         fileInput.addEventListener('mousedown', e => { e.stopPropagation(); e.stopImmediatePropagation(); });
         fileInput.addEventListener('change', (e) => {

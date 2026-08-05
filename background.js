@@ -1,3 +1,7 @@
+import './blocker/service.js';
+import { getTrustedSiteDescriptors, initializeTrustedSites, onTrustedSitesChanged } from './blocker/trusted-sites.js';
+import { isCompletelyExcludedHostname, isCompletelyExcludedUrl } from './blocker/shared.js';
+
 (function() {
 // BraveFox Enhancer "background.js" on Chromium platform
 
@@ -6,15 +10,7 @@ const EXT_PAGE = 'html/password-protected.html';
 
 // Sites on which BraveFox Enhancer must behave as fully disabled.
 function isBraveFoxCompletelyExcludedUrl(url) {
-    if (!url || typeof url !== 'string') return false;
-    try {
-        const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
-        return host === 'is.fi' || host.endsWith('.is.fi') ||
-               host === 'iltalehti.fi' || host.endsWith('.iltalehti.fi') ||
-               /^translate\.google\./i.test(host);
-    } catch (_) {
-        return false;
-    }
+    return isCompletelyExcludedUrl(url);
 }
  
 
@@ -164,13 +160,14 @@ const msedgeRegex = /^https?:\/\/([a-z0-9-]+\.)*msedge\.net(\/|$|[?#])/i;
 const allowedSites = new Set([
 	"xvideos.com",
 	"alastonsuomi.com",
-    	"sieni.us",
-    	"sieni.es"
+	"sieni.us",
+	"sieni.es",
 ]);
 
 // Dedicated high-priority DNR allow rule. This immediately overrides any older
 // xvideos.com block rule that may still exist while the fetched lists refresh.
-const ALLOWLIST_RULE_ID = 49999;
+const ALLOWLIST_RULE_ID = 1000;
+const LEGACY_ALLOWLIST_RULE_IDS = [49999];
 
 const isAllowlistedHostname = (hostname) => {
     if (!hostname || typeof hostname !== 'string') return false;
@@ -293,33 +290,46 @@ const ensureInitialHistoryAutoClearPurge = async () => {
 };
 
 const updateAllowlistRules = async () => {
-    const allowRules = Array.from(allowedSites).map((domain, index) => ({
+    const trusted = getTrustedSiteDescriptors();
+    const domainRules = Array.from(new Set([...allowedSites, ...trusted.domains])).map(domain => ({
+        urlFilter: `||${domain}/`,
+        label: domain
+    }));
+    const pathRules = trusted.pathRules.map(rule => ({
+        urlFilter: `||${rule.host}${rule.pathPrefix}^`,
+        label: `${rule.host}${rule.pathPrefix}`
+    }));
+    const descriptors = [...domainRules, ...pathRules];
+    const allowRules = descriptors.map((entry, index) => ({
         id: ALLOWLIST_RULE_ID + index,
-        priority: 1000,
+        priority: 10000,
         action: { type: 'allow' },
         condition: {
-            urlFilter: `||${domain}^`,
+            urlFilter: entry.urlFilter,
             resourceTypes: ['main_frame'],
             isUrlFilterCaseSensitive: false
         }
     }));
 
-    const allowRuleIds = allowRules.map(rule => rule.id);
+    const currentRuleIds = Array.from({ length: 1000 }, (_, index) => ALLOWLIST_RULE_ID + index);
+    const removeRuleIds = [...new Set([...currentRuleIds, ...LEGACY_ALLOWLIST_RULE_IDS])];
 
     await new Promise((resolve) => {
         chrome.declarativeNetRequest.updateDynamicRules({
-            removeRuleIds: allowRuleIds,
+            removeRuleIds,
             addRules: allowRules
         }, () => {
             if (chrome.runtime.lastError) {
-                console.error('Failed to apply domain allowlist rules:', chrome.runtime.lastError.message);
+                console.error('Failed to apply Focus Master trusted-site rules:', chrome.runtime.lastError.message);
             } else {
-                console.log(`Applied ${allowRules.length} domain allowlist rule(s): ${Array.from(allowedSites).join(', ')}`);
+                console.log(`Applied ${allowRules.length} trusted-site DNR allow rule(s).`);
             }
             resolve();
         });
     });
 };
+
+onTrustedSitesChanged(() => { void updateAllowlistRules(); });
 
 // Blocklist for other domains if needed
 const blockedSites = [
@@ -1129,7 +1139,8 @@ const manageDynamicRules = async (hostsList) => {
 const initializeExtension = async () => {
     console.log('Initializing extension...');
 
-    // Apply the explicit allowlist before cached/legacy block rules can affect navigation.
+    // Fetch the central trusted-site policy before cached/legacy block rules can affect navigation.
+    await initializeTrustedSites();
     await updateAllowlistRules();
     
     // Check if we have cached hosts first
@@ -1153,10 +1164,21 @@ const initializeExtension = async () => {
 // Memory-optimized blocklist update (fetch all, dedupe, limit for rules, store full list in chunks)
 const updateBlocklist = async () => {
     console.log("Fetching hosts list...");
-    const urls = [
-        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/BraveFoxHosts",
-        "https://raw.githubusercontent.com/NightmaREE3Z/BraveFox-Enhancer/refs/heads/main/hosts/Legacy/legacyFox",
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-porn/hosts"
+    const sources = [
+        {
+            id: 'BraveFoxHosts',
+            url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/BraveFoxHosts',
+            fallbackPath: 'blocker/lists/BraveFoxHosts'
+        },
+        {
+            id: 'StevenBlack',
+            url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-porn/hosts'
+        },
+        {
+            id: 'legacyFox',
+            url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/legacyFox',
+            fallbackPath: 'blocker/lists/legacyFox'
+        }
     ];
 
     // Fetch and concat all hosts files
@@ -1164,16 +1186,20 @@ const updateBlocklist = async () => {
     
     // NEW: Cache buster to force a true fetch from GitHub/CDN on every extension refresh
     const cacheBuster = `?force_refresh=${Date.now()}`;
-    for (const url of urls) {
-        const fetchUrl = url + cacheBuster;
-        const hosts = await fetchHostsFile(fetchUrl);
+    for (const source of sources) {
+        const fetchUrl = source.url + cacheBuster;
+        let hosts = await fetchHostsFile(fetchUrl);
+        if (!hosts.length && source.fallbackPath) {
+            console.warn(`Remote ${source.id} fetch failed; loading bundled fallback.`);
+            hosts = await fetchHostsFile(chrome.runtime.getURL(source.fallbackPath));
+        }
         allHosts = allHosts.concat(hosts);
     }
     tryGarbageCollection();
 
     // Deduplicate, then remove explicitly allowlisted domains and their subdomains.
     const deduplicatedHosts = Array.from(new Set(allHosts));
-    const uniqueHostsList = deduplicatedHosts.filter(host => !isAllowlistedHostname(host));
+    const uniqueHostsList = deduplicatedHosts.filter(host => !isAllowlistedHostname(host) && !isCompletelyExcludedHostname(host));
     const allowlistedHostsRemoved = deduplicatedHosts.length - uniqueHostsList.length;
     console.log(`Unique hosts list has ${uniqueHostsList.length} hosts (${allowlistedHostsRemoved} allowlisted entries removed)`);
 
@@ -2391,6 +2417,32 @@ bootManager();
   const recentGoogleQueryByTab = new Map();
   let recentGlobalGoogleQuery = null;
   const GOOGLE_QUERY_MAX_AGE_MS = 2 * 60 * 1000;
+  let nativeBrowserInfoPromise = null;
+
+  function getNativeBrowserInfo() {
+    if (!nativeBrowserInfoPromise) {
+      nativeBrowserInfoPromise = (async () => {
+        const ua = String(globalThis.navigator?.userAgent || '');
+        let browserName = 'Chrome';
+        let browserVersion = '';
+        const edge = /Edg\/([\d.]+)/i.exec(ua);
+        const opera = /(?:OPR|Opera)\/([\d.]+)/i.exec(ua);
+        const vivaldi = /Vivaldi\/([\d.]+)/i.exec(ua);
+        const chrome = /(?:Chrome|CriOS)\/([\d.]+)/i.exec(ua);
+        if (edge) { browserName = 'Edge'; browserVersion = edge[1]; }
+        else if (opera) { browserName = 'Opera'; browserVersion = opera[1]; }
+        else if (vivaldi) { browserName = 'Vivaldi'; browserVersion = vivaldi[1]; }
+        else if (chrome) {
+          browserVersion = chrome[1];
+          try {
+            if (globalThis.navigator?.brave?.isBrave && await globalThis.navigator.brave.isBrave()) browserName = 'Brave';
+          } catch {}
+        }
+        return { browserName, browserVersion, browserEdition: '', browserBuildId: '', browserPlatform: 'desktop' };
+      })();
+    }
+    return nativeBrowserInfoPromise;
+  }
 
   function cleanShortText(value, maxLength = 1000) {
     return (value == null) ? '' : String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
@@ -2526,7 +2578,7 @@ bootManager();
 
   function sanitizeLogPayload(payload) {
     const out = {};
-    const fields = ['source', 'blockedWord', 'attemptedSearch', 'context', 'pageUrl', 'referrer', 'timestamp'];
+    const fields = ['source', 'sourceCode', 'extensionName', 'extensionVersion', 'reasonType', 'reasonDetail', 'blockedWord', 'attemptedSearch', 'context', 'pageUrl', 'referrer', 'timestamp', 'browserName', 'browserVersion', 'browserEdition', 'browserBuildId', 'browserPlatform'];
     for (const key of fields) {
       const value = payload && payload[key];
       out[key] = (value == null) ? '' : String(value).slice(0, 1000);
@@ -2582,22 +2634,34 @@ bootManager();
       payload.attemptedSearch = highlightSearchForPlainLog(payload.attemptedSearch, payload.blockedWord);
     } catch (_) {}
 
-    try {
-      chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
-        const lastError = chrome.runtime.lastError;
-        if (lastError) {
-          // Silent by design. If the native logger is not installed, blocking still works.
-          try { console.warn('[BraveFox Redirect Logger] Native host unavailable:', lastError.message); } catch (_) {}
-          sendResponse && sendResponse({ ok: false, error: lastError.message || 'native-host-unavailable' });
-          return;
-        }
-        sendResponse && sendResponse(response || { ok: true });
-      });
-      return true;
-    } catch (e) {
-      try { console.warn('[BraveFox Redirect Logger] Failed to send native log:', e); } catch (_) {}
-      sendResponse && sendResponse({ ok: false, error: String(e && e.message || e) });
-      return false;
-    }
+    (async () => {
+      try {
+        const manifest = chrome.runtime.getManifest();
+        const detector = cleanShortText(payload.source || '', 120);
+        const detail = cleanShortText([detector, payload.context].filter(Boolean).join(' — '), 500);
+        Object.assign(payload, await getNativeBrowserInfo(), {
+          source: 'BraveFox Enhancer (BFE)',
+          sourceCode: 'BFE',
+          extensionName: manifest.name || '',
+          extensionVersion: manifest.version || '',
+          reasonType: payload.reasonType || 'term',
+          reasonDetail: payload.reasonDetail || detail || 'BraveFox Enhancer content filter'
+        });
+
+        chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            try { console.warn('[BraveFox Redirect Logger] Native host unavailable:', lastError.message); } catch (_) {}
+            sendResponse && sendResponse({ ok: false, error: lastError.message || 'native-host-unavailable' });
+            return;
+          }
+          sendResponse && sendResponse(response || { ok: true });
+        });
+      } catch (e) {
+        try { console.warn('[BraveFox Redirect Logger] Failed to send native log:', e); } catch (_) {}
+        sendResponse && sendResponse({ ok: false, error: String(e && e.message || e) });
+      }
+    })();
+    return true;
   });
 })();
