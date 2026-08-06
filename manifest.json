@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.0.0",
+  "version": "27.0.6",
   "description": "Makes everyday browsing more peaceful with BraveFox Enhancer and its built-in Focus Master.",
   "background": {
     "service_worker": "background.js",
@@ -1295,6 +1295,15 @@
         "*://translate.google.zm/*",
         "*://translate.google.zw/*"
       ]
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "scripts/ChatGPT.js"
+      ],
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
