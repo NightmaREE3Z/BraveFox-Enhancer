@@ -1,6 +1,6 @@
 /* pwprotected.js
- * Controls the overlay displayed on your internal password-protected.html.
- * Smart enough to handle both Top-Level Redirections and Iframe injections.
+ * Controls BraveFox's internal password-protected.html page.
+ * Supports normal top-level protected-page routing plus legacy embedded callers.
  */
 
 (() => {
@@ -12,6 +12,8 @@
   const PAGE_PARAMS = new URLSearchParams(window.location.search);
   const CUSTOM_PROMPT_TITLE = String(PAGE_PARAMS.get('title') || '').trim();
   const COMPACT_PROMPT = PAGE_PARAMS.get('compact') === '1';
+  const CHATGPT_AUTH_TARGET = PAGE_PARAMS.get('target') === 'chatgpt';
+  const CHATGPT_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
 
   // Build a minimal full-page scaffold in case the HTML is empty.
   function ensureBase() {
@@ -361,12 +363,46 @@
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (input.value === FIXED_PASSWORD) {
-        // SMART DETECTION: Are we in an iframe or a top-level tab?
+        // ChatGPT protected routes/actions always use this page as a real top-level
+        // extension page. The background owns the one-time return grant so the
+        // ChatGPT page cannot simply dismiss its own password UI.
+        if (CHATGPT_AUTH_TARGET) {
+          if (!CHATGPT_AUTH_REQUEST_ID || window !== window.parent) {
+            error.textContent = 'ChatGPT password request is invalid or expired.';
+            return;
+          }
+
+          submit.disabled = true;
+          input.disabled = true;
+          error.textContent = '';
+
+          try {
+            chrome.runtime.sendMessage({
+              type: 'BRAVEFOX_CHATGPT_AUTH_APPROVE',
+              requestId: CHATGPT_AUTH_REQUEST_ID
+            }, response => {
+              const runtimeError = chrome.runtime.lastError;
+              if (runtimeError || !response?.ok) {
+                submit.disabled = false;
+                input.disabled = false;
+                error.textContent = runtimeError?.message || response?.error || 'ChatGPT password request expired.';
+                input.focus();
+              }
+              // On success the background navigates this tab back to ChatGPT.
+            });
+          } catch (authError) {
+            submit.disabled = false;
+            input.disabled = false;
+            error.textContent = authError?.message || 'ChatGPT password request failed.';
+            input.focus();
+          }
+          return;
+        }
+
+        // Legacy callers still supported for the existing system-page password flow.
         if (window !== window.parent) {
-            // We are inside the injected content script iframe. Send signal to parent.
             window.parent.postMessage('BraveFox-Unlock', '*');
         } else {
-            // We are a top level tab (redirected from Web Store, extensions page, etc)
             chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
                 chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
             });

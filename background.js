@@ -162,6 +162,7 @@ const allowedSites = new Set([
 	"alastonsuomi.com",
 	"sieni.us",
 	"sieni.es",
+	"fastvid.xyz",
 ]);
 
 // Dedicated high-priority DNR allow rule. This immediately overrides any older
@@ -187,37 +188,129 @@ const isAllowlistedHostname = (hostname) => {
 // Sites that remain accessible but must never be retained in browser history.
 // A base-domain entry also covers its normal subdomains.
 const historyAutoClearSites = new Set([
-	"xvideos.com",
-	"alastonsuomi.com",
-    	"user.blocksite.co"
+    "xvideos.com",
+    "alastonsuomi.com",
+    "chatgpt.com",
+    "openai.com",
+    "instagram.com/popular",
+    "user.blocksite.co"
 ]);
 
-// Bump this key whenever the auto-clear domain set changes so an extension reload
-// immediately purges pre-existing entries for newly added domains.
-const HISTORY_AUTO_CLEAR_PURGE_KEY = 'historyAutoClearInitialPurgeDone_v2';
+// Bump this key whenever the auto-clear domain set or purge behavior changes so an
+// extension reload immediately cleans entries created by older BraveFox builds.
+const HISTORY_AUTO_CLEAR_PURGE_KEY = 'historyAutoClearInitialPurgeDone_v4';
+const HISTORY_AUTO_CLEAR_SWEEP_ALARM = 'bravefoxHistoryAutoClearSweep_v1';
+const HISTORY_AUTO_CLEAR_SWEEP_MINUTES = 1;
+const HISTORY_AUTO_CLEAR_CRITICAL_DOMAINS = Object.freeze(['chatgpt.com', 'openai.com']);
+const HISTORY_AUTO_CLEAR_RETRY_MS = 1600;
+const HISTORY_AUTO_CLEAR_FINAL_PURGE_MS = 2600;
+const HISTORY_AUTO_CLEAR_TAB_STORAGE_PREFIX = 'historyAutoClearTab_v1_';
 
-const isHistoryAutoClearHostname = (hostname) => {
-    if (!hostname || typeof hostname !== 'string') return false;
+// Chromium can update/commit a visit after history.onVisited fires. Keep one delayed
+// retry per URL, and remember auto-clear tabs so PWA/app-window closure can trigger a
+// final domain sweep after the renderer is gone.
+const historyAutoClearRetryTimers = new Map();
+const historyAutoClearDomainPurgeTimers = new Map();
+const historyAutoClearTabs = new Map();
+
+const getHistoryAutoClearDomainForHostname = (hostname) => {
+    if (!hostname || typeof hostname !== 'string') return null;
     const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, '');
 
     for (const domain of historyAutoClearSites) {
         const normalizedDomain = domain.toLowerCase();
         if (normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`)) {
-            return true;
+            return normalizedDomain;
         }
     }
 
-    return false;
+    return null;
 };
 
-const isHistoryAutoClearUrl = (url) => {
-    if (!url || typeof url !== 'string' || isBraveFoxCompletelyExcludedUrl(url)) return false;
+const isHistoryAutoClearHostname = (hostname) => Boolean(getHistoryAutoClearDomainForHostname(hostname));
+
+const getHistoryAutoClearDomainForUrl = (url) => {
+    // IMPORTANT: history auto-clear is intentionally independent from BraveFox's
+    // complete-exclusion/trusted-site policy. A site such as chatgpt.com can be fully
+    // trusted for blocking purposes while still being explicitly configured to leave no
+    // browser-history trail.
+    if (!url || typeof url !== 'string') return null;
     try {
         const parsedUrl = new URL(url);
-        return (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') &&
-               isHistoryAutoClearHostname(parsedUrl.hostname);
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return null;
+        return getHistoryAutoClearDomainForHostname(parsedUrl.hostname);
     } catch (_) {
-        return false;
+        return null;
+    }
+};
+
+const isHistoryAutoClearUrl = (url) => Boolean(getHistoryAutoClearDomainForUrl(url));
+
+const getHistoryAutoClearTabStorageKey = (tabId) => `${HISTORY_AUTO_CLEAR_TAB_STORAGE_PREFIX}${tabId}`;
+
+const removePersistedHistoryAutoClearTab = (tabId) => {
+    if (!chrome.storage.session || typeof tabId !== 'number') return;
+    void chrome.storage.session.remove([getHistoryAutoClearTabStorageKey(tabId)]).catch(() => {});
+};
+
+const trackHistoryAutoClearTab = (tabId, url, windowId = undefined) => {
+    if (typeof tabId !== 'number' || !url || typeof url !== 'string') return null;
+
+    // Do not throw away the last known ChatGPT/PWA identity for internal URLs such as
+    // about:blank that may briefly appear during app-window teardown.
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch (_) {
+        return historyAutoClearTabs.get(tabId) || null;
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        return historyAutoClearTabs.get(tabId) || null;
+    }
+
+    const domain = getHistoryAutoClearDomainForHostname(parsedUrl.hostname);
+    if (!domain) {
+        historyAutoClearTabs.delete(tabId);
+        removePersistedHistoryAutoClearTab(tabId);
+        return null;
+    }
+
+    const previous = historyAutoClearTabs.get(tabId);
+    const tracked = {
+        domain,
+        url,
+        windowId: typeof windowId === 'number' ? windowId : previous?.windowId
+    };
+
+    const unchanged = previous &&
+        previous.domain === tracked.domain &&
+        previous.url === tracked.url &&
+        previous.windowId === tracked.windowId;
+
+    historyAutoClearTabs.set(tabId, tracked);
+
+    // MV3 service workers can be suspended between opening and closing a PWA. Persist the
+    // tiny per-tab record in storage.session so tabs.onRemoved can still identify the app
+    // after a worker restart. Duplicate navigation events do not rewrite unchanged state.
+    if (!unchanged && chrome.storage.session) {
+        const key = getHistoryAutoClearTabStorageKey(tabId);
+        void chrome.storage.session.set({ [key]: tracked }).catch(() => {});
+    }
+
+    return tracked;
+};
+
+const getTrackedHistoryAutoClearTab = async (tabId) => {
+    const inMemory = historyAutoClearTabs.get(tabId);
+    if (inMemory) return inMemory;
+    if (!chrome.storage.session || typeof tabId !== 'number') return null;
+
+    try {
+        const key = getHistoryAutoClearTabStorageKey(tabId);
+        const state = await chrome.storage.session.get([key]);
+        return state[key] || null;
+    } catch (_) {
+        return null;
     }
 };
 
@@ -234,44 +327,140 @@ const deleteAutoClearHistoryUrl = async (url, source = 'unknown') => {
     }
 };
 
-// Purge matching entries that existed before this version of the extension loaded.
-const purgeAutoClearHistory = async () => {
+// Delete now, then retry once after Chromium has had time to finish committing the
+// navigation. Repeated events for the same URL simply move the retry later instead of
+// stacking timers.
+const scheduleAutoClearHistoryUrl = (url, source = 'unknown') => {
+    if (!isHistoryAutoClearUrl(url)) return false;
+
+    void deleteAutoClearHistoryUrl(url, source);
+
+    const existingTimer = historyAutoClearRetryTimers.get(url);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        resourceTracker.timeouts.delete(existingTimer);
+    }
+
+    const retryId = setTimeout(async () => {
+        historyAutoClearRetryTimers.delete(url);
+        resourceTracker.timeouts.delete(retryId);
+        await deleteAutoClearHistoryUrl(url, `${source} delayed retry`);
+    }, HISTORY_AUTO_CLEAR_RETRY_MS);
+
+    historyAutoClearRetryTimers.set(url, retryId);
+    resourceTracker.addTimeout(retryId);
+    return true;
+};
+
+const purgeAutoClearHistoryDomain = async (domain, source = 'domain purge') => {
+    const normalizedDomain = String(domain || '').trim().toLowerCase();
+    if (!historyAutoClearSites.has(normalizedDomain)) return 0;
+
     let deletedCount = 0;
-
     try {
-        for (const domain of historyAutoClearSites) {
-            const results = await chrome.history.search({
-                text: domain,
-                startTime: 0,
-                maxResults: 100000
-            });
+        const results = await chrome.history.search({
+            text: normalizedDomain,
+            startTime: 0,
+            maxResults: 100000
+        });
 
-            const matchingUrls = Array.from(new Set(
-                results
-                    .map(entry => entry && entry.url)
-                    .filter(url => isHistoryAutoClearUrl(url))
-            ));
+        const matchingUrls = Array.from(new Set(
+            results
+                .map(entry => entry && entry.url)
+                .filter(url => getHistoryAutoClearDomainForUrl(url) === normalizedDomain)
+        ));
 
-            // Keep the service worker responsive if the history contains many matching pages.
-            for (let i = 0; i < matchingUrls.length; i += 100) {
-                const batch = matchingUrls.slice(i, i + 100);
-                const resultsForBatch = await Promise.all(
-                    batch.map(url => deleteAutoClearHistoryUrl(url, 'initial purge'))
-                );
-                deletedCount += resultsForBatch.filter(Boolean).length;
-            }
+        for (let i = 0; i < matchingUrls.length; i += 100) {
+            const batch = matchingUrls.slice(i, i + 100);
+            const resultsForBatch = await Promise.all(
+                batch.map(url => deleteAutoClearHistoryUrl(url, source))
+            );
+            deletedCount += resultsForBatch.filter(Boolean).length;
         }
-
-        console.log(`History auto-clear purge completed: ${deletedCount} URL(s) removed.`);
     } catch (error) {
-        console.warn('History auto-clear purge failed:', error);
+        console.warn(`History auto-clear purge failed for ${normalizedDomain}:`, error);
     }
 
     return deletedCount;
 };
 
+// Purge matching entries that existed before this version of the extension loaded.
+const purgeAutoClearHistory = async (source = 'initial purge') => {
+    let deletedCount = 0;
+
+    for (const domain of historyAutoClearSites) {
+        deletedCount += await purgeAutoClearHistoryDomain(domain, source);
+    }
+
+    console.log(`History auto-clear purge completed: ${deletedCount} URL(s) removed.`);
+    return deletedCount;
+};
+
+// PWA/app-window shutdown is the last authoritative cleanup point. Purge immediately,
+// then once more after a short grace period in case Chromium writes a final navigation
+// record while tearing the app window down.
+const scheduleAutoClearHistoryDomainPurge = (domain, source = 'tab/window closed') => {
+    const normalizedDomain = String(domain || '').trim().toLowerCase();
+    if (!historyAutoClearSites.has(normalizedDomain)) return false;
+
+    void purgeAutoClearHistoryDomain(normalizedDomain, `${source} immediate purge`);
+
+    const existingTimer = historyAutoClearDomainPurgeTimers.get(normalizedDomain);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        resourceTracker.timeouts.delete(existingTimer);
+    }
+
+    const purgeId = setTimeout(async () => {
+        historyAutoClearDomainPurgeTimers.delete(normalizedDomain);
+        resourceTracker.timeouts.delete(purgeId);
+        const deleted = await purgeAutoClearHistoryDomain(normalizedDomain, `${source} final purge`);
+        console.log(`Final history purge for ${normalizedDomain}: ${deleted} URL(s) removed.`);
+    }, HISTORY_AUTO_CLEAR_FINAL_PURGE_MS);
+
+    historyAutoClearDomainPurgeTimers.set(normalizedDomain, purgeId);
+    resourceTracker.addTimeout(purgeId);
+    return true;
+};
+
+const runCriticalHistoryAutoClearSweep = async (source = 'periodic safety sweep') => {
+    let deletedCount = 0;
+    for (const domain of HISTORY_AUTO_CLEAR_CRITICAL_DOMAINS) {
+        deletedCount += await purgeAutoClearHistoryDomain(domain, source);
+    }
+    if (deletedCount > 0) {
+        console.log(`History safety sweep removed ${deletedCount} ChatGPT/OpenAI URL(s).`);
+    }
+    return deletedCount;
+};
+
+const ensureHistoryAutoClearSweepAlarm = () => {
+    try {
+        if (!chrome.alarms?.create) return;
+        chrome.alarms.create(HISTORY_AUTO_CLEAR_SWEEP_ALARM, {
+            periodInMinutes: HISTORY_AUTO_CLEAR_SWEEP_MINUTES
+        });
+    } catch (error) {
+        console.warn('Failed to create history auto-clear safety alarm:', error);
+    }
+};
+
+const primeHistoryAutoClearTabTracking = async () => {
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+            const url = tab?.url || tab?.pendingUrl || '';
+            if (typeof tab?.id === 'number' && url) {
+                trackHistoryAutoClearTab(tab.id, url, tab.windowId);
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to prime history auto-clear tab tracking:', error);
+    }
+};
+
 // Do the potentially broad history search only once per browser session. New visits are
-// handled individually by chrome.history.onVisited below.
+// handled individually by chrome.history/webNavigation listeners below.
 const ensureInitialHistoryAutoClearPurge = async () => {
     try {
         if (chrome.storage.session) {
@@ -364,6 +553,7 @@ const blockedSites = [
    "mozilla.org/fi/",
    "brave.com/",
    "brave.com",
+   "instagram.com/popular",
    "download.fi/verkko",
    "uptodown.com/windows/microsoft-edge",
    "microsoft-edge.uptodown.com",
@@ -1527,12 +1717,29 @@ const closeBlockedTabImmediately = async (url, tabId, maxRetries = 3) => {
 // Enhanced event listener registration with error handling and cleanup tracking
 const registerEventListeners = () => {
     try {
-        // Delete selected allowed-site visits as soon as Chromium records them.
+        const processAutoClearNavigation = (details, source) => {
+            try {
+                if (!details || details.frameId !== 0 || !details.url) return;
+
+                // Do NOT apply BraveFox's complete-exclusion policy here. History cleanup
+                // is a separate opt-in policy, and chatgpt.com/openai.com are deliberately
+                // both trusted for blocking and auto-cleared from history.
+                trackHistoryAutoClearTab(details.tabId, details.url);
+                if (isHistoryAutoClearUrl(details.url)) {
+                    scheduleAutoClearHistoryUrl(details.url, source);
+                }
+            } catch (error) {
+                console.error(`Error in ${source} history cleanup:`, error);
+            }
+        };
+
+        // history.onVisited fires before the page is fully loaded, so scheduleAutoClearHistoryUrl
+        // performs an immediate delete plus a delayed retry after Chromium finishes committing it.
         if (chrome.history && chrome.history.onVisited) {
             const onHistoryVisitedHandler = (historyItem) => {
                 try {
                     if (historyItem && isHistoryAutoClearUrl(historyItem.url)) {
-                        deleteAutoClearHistoryUrl(historyItem.url, 'history.onVisited');
+                        scheduleAutoClearHistoryUrl(historyItem.url, 'history.onVisited');
                     }
                 } catch (error) {
                     console.error('Error in history onVisited listener:', error);
@@ -1549,28 +1756,35 @@ const registerEventListeners = () => {
         if (chrome.tabs.onCreated) {
             const onCreatedHandler = (tab) => {
                 try {
-                    if (tab && tab.url && isBraveFoxCompletelyExcludedUrl(tab.url)) return;
+                    const tabUrl = tab?.url || tab?.pendingUrl || '';
+                    if (typeof tab?.id === 'number' && tabUrl) {
+                        trackHistoryAutoClearTab(tab.id, tabUrl, tab.windowId);
+                        if (isHistoryAutoClearUrl(tabUrl)) {
+                            scheduleAutoClearHistoryUrl(tabUrl, 'tabs.onCreated');
+                        }
+                    }
+
+                    if (tabUrl && isBraveFoxCompletelyExcludedUrl(tabUrl)) return;
                     // Redirect protected system pages immediately on tab creation
-                    if (tab.url && isProtectedSystemPageUrl(tab.url)) {
+                    if (tabUrl && isProtectedSystemPageUrl(tabUrl)) {
                         if (isBypassed(tab.id)) {
                             return; // allow during bypass
                         }
-                        redirectToProtectedSystemPage(tab.id, tab.url);
+                        redirectToProtectedSystemPage(tab.id, tabUrl);
                         return; // nothing else to do for this tab
                     }
 
-                    if (tab.url && isBlockedUrl(tab.url) && !closedTabs.has(tab.id)) {
+                    if (tabUrl && isBlockedUrl(tabUrl) && !closedTabs.has(tab.id)) {
                         closedTabs.add(tab.id);
-                        console.log(`New tab created with blocked URL, closing immediately: ${tab.url}`);
-                        closeBlockedTabImmediately(tab.url, tab.id);
+                        console.log(`New tab created with blocked URL, closing immediately: ${tabUrl}`);
+                        closeBlockedTabImmediately(tabUrl, tab.id);
                     }
                 } catch (error) {
                     console.error('Error in onCreated listener:', error);
                 }
             };
             chrome.tabs.onCreated.addListener(onCreatedHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.tabs.onCreated.removeListener(onCreatedHandler);
             });
@@ -1581,6 +1795,17 @@ const registerEventListeners = () => {
             const onUpdatedHandler = (tabId, changeInfo, tab) => {
                 try {
                     const braveFoxCandidateUrl = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+
+                    if (braveFoxCandidateUrl) {
+                        trackHistoryAutoClearTab(tabId, braveFoxCandidateUrl, tab?.windowId);
+                    }
+
+                    // History auto-clear must run before the complete-exclusion early return.
+                    // ChatGPT/OpenAI are intentionally trusted sites *and* history-auto-clear sites.
+                    if (changeInfo.url && isHistoryAutoClearUrl(changeInfo.url)) {
+                        scheduleAutoClearHistoryUrl(changeInfo.url, 'tabs.onUpdated');
+                    }
+
                     if (isBraveFoxCompletelyExcludedUrl(braveFoxCandidateUrl)) return;
                     // Redirect when a tab navigates to a protected system page
                     const urlIsProtected = changeInfo.url ? isProtectedSystemPageUrl(changeInfo.url) : (tab && tab.url && isProtectedSystemPageUrl(tab.url));
@@ -1593,25 +1818,19 @@ const registerEventListeners = () => {
                         return;
                     }
 
-                    // Belt-and-suspenders cleanup: onVisited is authoritative, but this also
-                    // catches the navigation URL immediately if it already exists in history.
-                    if (changeInfo.url && isHistoryAutoClearUrl(changeInfo.url)) {
-                        deleteAutoClearHistoryUrl(changeInfo.url, 'tabs.onUpdated');
-                    }
-
                     // Existing blocking logic
                     if (changeInfo.url && isBlockedUrl(changeInfo.url) && !closedTabs.has(tabId)) {
                         closedTabs.add(tabId);
                         console.log(`Tab navigation to blocked URL detected, closing immediately: ${changeInfo.url}`);
                         closeBlockedTabImmediately(changeInfo.url, tabId);
                     }
-                    
+
                     // Handle incognito mode updates
                     if (changeInfo.status === 'loading') {
                         updateIncognitoBlockingRules();
                     }
-                    
-                    // Handle history cleanup
+
+                    // Handle history cleanup for blocked URLs
                     if (changeInfo.url && isBlockedUrl(changeInfo.url)) {
                         console.log(`Detected blocked site: ${changeInfo.url}, initiating cleanup...`);
                         cleanUpTabHistory(tabId, changeInfo.url);
@@ -1621,8 +1840,7 @@ const registerEventListeners = () => {
                 }
             };
             chrome.tabs.onUpdated.addListener(onUpdatedHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
             });
@@ -1632,6 +1850,9 @@ const registerEventListeners = () => {
         if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
             const onBeforeNavigateHandler = (details) => {
                 try {
+                    if (details?.frameId === 0 && details.url) {
+                        trackHistoryAutoClearTab(details.tabId, details.url);
+                    }
                     if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
                     if (details.frameId === 0) {
                         // Redirect earliest possible for protected system pages
@@ -1654,18 +1875,47 @@ const registerEventListeners = () => {
                 }
             };
             chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigateHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigateHandler);
             });
         }
 
-        // Also log completion; TTL bypass will expire on its own
+        // Traditional navigation commit: history is much more likely to be fully registered here.
+        if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
+            const onCommittedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onCommitted');
+            chrome.webNavigation.onCommitted.addListener(onCommittedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onCommitted.removeListener(onCommittedHandler);
+            });
+        }
+
+        // ChatGPT is a long-lived SPA. pushState/replaceState navigations land here even when
+        // tabs.onUpdated/history.onVisited do not behave like a traditional page navigation.
+        if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
+            const onHistoryStateUpdatedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onHistoryStateUpdated');
+            chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistoryStateUpdatedHandler);
+            });
+        }
+
+        // Hash-only transitions (including settings-style routes) get their own webNavigation event.
+        if (chrome.webNavigation && chrome.webNavigation.onReferenceFragmentUpdated) {
+            const onReferenceFragmentUpdatedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onReferenceFragmentUpdated');
+            chrome.webNavigation.onReferenceFragmentUpdated.addListener(onReferenceFragmentUpdatedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onReferenceFragmentUpdated.removeListener(onReferenceFragmentUpdatedHandler);
+            });
+        }
+
+        // Completion is another post-commit safety net and keeps the protected-page logging intact.
         if (chrome.webNavigation && chrome.webNavigation.onCompleted) {
             const onCompletedHandler = (details) => {
                 try {
+                    processAutoClearNavigation(details, 'webNavigation.onCompleted');
                     if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
+
                     if (details.frameId === 0 && isProtectedSystemPageUrl(details.url)) {
                         console.log(`Protected page completed for tab ${details.tabId}. Bypass active: ${isBypassed(details.tabId)}`);
                     }
@@ -1679,45 +1929,64 @@ const registerEventListeners = () => {
             });
         }
 
-        // Listen for window creation and removal to handle incognito mode
+        // Listen for window creation and removal to handle incognito mode and PWA teardown.
         if (chrome.windows.onCreated) {
             const onWindowCreatedHandler = () => {
                 try {
                     updateIncognitoBlockingRules();
-                    // also scan visible tabs for protected pages when a window is created
                     scanAndRedirectProtectedTabs();
                 } catch (error) {
                     console.error('Error in window onCreated listener:', error);
                 }
             };
             chrome.windows.onCreated.addListener(onWindowCreatedHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.windows.onCreated.removeListener(onWindowCreatedHandler);
             });
         }
-        
+
         if (chrome.windows.onRemoved) {
-            const onWindowRemovedHandler = () => {
+            const onWindowRemovedHandler = (windowId) => {
                 try {
+                    // App/PWA windows are still Chromium windows containing tabs. If we know an
+                    // auto-clear tab lived here, schedule its final domain purge immediately.
+                    const domainsToPurge = new Set();
+                    for (const tracked of historyAutoClearTabs.values()) {
+                        if (tracked?.windowId === windowId && tracked.domain) domainsToPurge.add(tracked.domain);
+                    }
+                    for (const domain of domainsToPurge) {
+                        scheduleAutoClearHistoryDomainPurge(domain, 'windows.onRemoved');
+                    }
+
                     updateIncognitoBlockingRules();
                 } catch (error) {
                     console.error('Error in window onRemoved listener:', error);
                 }
             };
             chrome.windows.onRemoved.addListener(onWindowRemovedHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.windows.onRemoved.removeListener(onWindowRemovedHandler);
             });
         }
 
-        // Listen for tab removal to handle cleanup
+        // Listen for tab removal to handle cleanup. This is the authoritative PWA/session-end
+        // hook because onRemoved does not provide the URL, so we use the tracked last URL/domain.
         if (chrome.tabs.onRemoved) {
             const onTabRemovedHandler = (tabId, removeInfo) => {
                 try {
+                    // Resolve the record asynchronously as well, because a Manifest V3 worker may
+                    // have restarted after the PWA opened and lost its in-memory Map.
+                    void (async () => {
+                        const tracked = await getTrackedHistoryAutoClearTab(tabId);
+                        historyAutoClearTabs.delete(tabId);
+                        removePersistedHistoryAutoClearTab(tabId);
+                        if (tracked?.domain) {
+                            scheduleAutoClearHistoryDomainPurge(tracked.domain, 'tabs.onRemoved');
+                        }
+                    })();
+
                     if (closedTabs.has(tabId)) {
                         closedTabs.delete(tabId);
                         console.log(`Removed tab ${tabId} from closedTabs set.`);
@@ -1725,20 +1994,31 @@ const registerEventListeners = () => {
                     // Clear any bypass and original URLs for closed tabs
                     if (UNLOCK_BYPASS_TABS.has(tabId)) UNLOCK_BYPASS_TABS.delete(tabId);
                     if (ORIGINAL_URLS.has(tabId)) ORIGINAL_URLS.delete(tabId);
-                    
+
                     updateIncognitoBlockingRules();
                 } catch (error) {
                     console.error('Error in onRemoved listener:', error);
                 }
             };
             chrome.tabs.onRemoved.addListener(onTabRemovedHandler);
-            
-            // Track cleanup function
+
             resourceTracker.addEventCleanup(() => {
                 chrome.tabs.onRemoved.removeListener(onTabRemovedHandler);
             });
         }
-        
+
+        if (chrome.alarms?.onAlarm) {
+            const onHistoryAutoClearAlarm = (alarm) => {
+                if (alarm?.name !== HISTORY_AUTO_CLEAR_SWEEP_ALARM) return;
+                void runCriticalHistoryAutoClearSweep('chrome.alarms safety sweep');
+            };
+            chrome.alarms.onAlarm.addListener(onHistoryAutoClearAlarm);
+            resourceTracker.addEventCleanup(() => {
+                chrome.alarms.onAlarm.removeListener(onHistoryAutoClearAlarm);
+            });
+            ensureHistoryAutoClearSweepAlarm();
+        }
+
         console.log('Event listeners registered successfully');
     } catch (error) {
         console.error('Error registering event listeners:', error);
@@ -1831,6 +2111,189 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try { sendResponse?.({ ok: false, error: e?.message || String(e) }); } catch {}
     return true;
   }
+});
+
+
+// === BraveFox ChatGPT native password-page bridge ==============================
+// Protected ChatGPT routes/actions use the extension's top-level password page.
+// Requests are keyed to the originating tab and survive a brief MV3 worker nap via
+// chrome.storage.session. A successful password grants exactly one return trip.
+const BRAVEFOX_CHATGPT_AUTH_KEY = 'bravefoxChatGptAuthRequests_v1';
+const BRAVEFOX_CHATGPT_AUTH_TTL_MS = 2 * 60 * 1000;
+
+function bravefoxChatGptProtectedRouteKey(rawUrl) {
+    try {
+        const url = new URL(String(rawUrl || ''));
+        if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'chatgpt.com') return '';
+        const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+        const hash = decodeURIComponent(url.hash || '').toLowerCase();
+        if (pathname === '/plugins' || pathname.startsWith('/plugins/')) return 'plugins';
+        if (pathname === '/gpts' || pathname.startsWith('/gpts/')) return 'gpts';
+        if (hash.startsWith('#settings/personalization')) return 'personalization';
+        return '';
+    } catch (_) {
+        return '';
+    }
+}
+
+async function bravefoxLoadChatGptAuthRequests() {
+    try {
+        if (!chrome.storage?.session) return {};
+        const state = await chrome.storage.session.get([BRAVEFOX_CHATGPT_AUTH_KEY]);
+        const requests = state?.[BRAVEFOX_CHATGPT_AUTH_KEY];
+        return requests && typeof requests === 'object' ? requests : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+async function bravefoxSaveChatGptAuthRequests(requests) {
+    try {
+        if (!chrome.storage?.session) return;
+        await chrome.storage.session.set({ [BRAVEFOX_CHATGPT_AUTH_KEY]: requests || {} });
+    } catch (_) {}
+}
+
+function bravefoxPruneChatGptAuthRequests(requests) {
+    const now = Date.now();
+    for (const [id, request] of Object.entries(requests || {})) {
+        if (!request || Number(request.expiresAt) <= now) delete requests[id];
+    }
+    return requests;
+}
+
+function bravefoxIsChatGptPasswordPage(sender, requestId) {
+    try {
+        if (sender?.id !== chrome.runtime.id) return false;
+        const url = new URL(String(sender?.url || sender?.tab?.url || ''));
+        return url.protocol === 'chrome-extension:' &&
+            url.host === chrome.runtime.id &&
+            url.pathname === '/html/password-protected.html' &&
+            url.searchParams.get('target') === 'chatgpt' &&
+            (!requestId || url.searchParams.get('request') === requestId);
+    } catch (_) {
+        return false;
+    }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+    if (!String(message.type || '').startsWith('BRAVEFOX_CHATGPT_AUTH_')) return false;
+
+    (async () => {
+        try {
+            const tabId = sender?.tab?.id;
+            if (!Number.isInteger(tabId)) throw new Error('ChatGPT auth tab could not be identified.');
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_BEGIN') {
+                const senderUrl = String(sender?.tab?.url || sender?.url || '');
+                if (!senderUrl.startsWith('https://chatgpt.com/')) throw new Error('ChatGPT auth request denied.');
+
+                const returnUrl = String(message.returnUrl || '').trim();
+                const routeKey = bravefoxChatGptProtectedRouteKey(returnUrl);
+                if (!routeKey) throw new Error('ChatGPT auth return route is not protected.');
+
+                const requestId = String(message.requestId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96);
+                if (!requestId) throw new Error('ChatGPT auth request id is missing.');
+
+                const kind = ['protected-route', 'memory-summary', 'plugin-install'].includes(message.kind)
+                    ? message.kind
+                    : 'protected-route';
+                const payload = message.payload && typeof message.payload === 'object'
+                    ? { pluginKey: String(message.payload.pluginKey || '').slice(0, 300) }
+                    : {};
+                const title = String(message.title || 'ChatGPT page is password protected').slice(0, 180);
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                requests[requestId] = {
+                    requestId,
+                    tabId,
+                    returnUrl,
+                    routeKey,
+                    kind,
+                    payload,
+                    title,
+                    approved: false,
+                    createdAt: Date.now(),
+                    expiresAt: Date.now() + BRAVEFOX_CHATGPT_AUTH_TTL_MS
+                };
+                await bravefoxSaveChatGptAuthRequests(requests);
+
+                const params = new URLSearchParams({
+                    target: 'chatgpt',
+                    request: requestId,
+                    compact: '1',
+                    title
+                });
+                const passwordUrl = chrome.runtime.getURL(`html/password-protected.html?${params.toString()}`);
+                await chrome.tabs.update(tabId, { url: passwordUrl });
+                sendResponse({ ok: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_APPROVE') {
+                const requestId = String(message.requestId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96);
+                if (!requestId || !bravefoxIsChatGptPasswordPage(sender, requestId)) {
+                    throw new Error('ChatGPT auth approval denied.');
+                }
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                const request = requests[requestId];
+                if (!request || request.tabId !== tabId) throw new Error('ChatGPT auth request expired.');
+
+                request.approved = true;
+                request.expiresAt = Date.now() + 60 * 1000;
+                requests[requestId] = request;
+                await bravefoxSaveChatGptAuthRequests(requests);
+                await chrome.tabs.update(tabId, { url: request.returnUrl });
+                sendResponse({ ok: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_CONSUME') {
+                const currentUrl = String(sender?.tab?.url || sender?.url || '');
+                const routeKey = bravefoxChatGptProtectedRouteKey(currentUrl);
+                if (!routeKey) {
+                    sendResponse({ ok: true, unlocked: false });
+                    return;
+                }
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                let matchId = '';
+                let match = null;
+                for (const [id, request] of Object.entries(requests)) {
+                    if (!request || !request.approved || request.tabId !== tabId || request.routeKey !== routeKey) continue;
+                    if (!match || Number(request.createdAt) > Number(match.createdAt)) {
+                        matchId = id;
+                        match = request;
+                    }
+                }
+
+                if (!match) {
+                    await bravefoxSaveChatGptAuthRequests(requests);
+                    sendResponse({ ok: true, unlocked: false });
+                    return;
+                }
+
+                delete requests[matchId];
+                await bravefoxSaveChatGptAuthRequests(requests);
+                sendResponse({
+                    ok: true,
+                    unlocked: true,
+                    routeKey: match.routeKey,
+                    kind: match.kind,
+                    payload: match.payload || {}
+                });
+                return;
+            }
+
+            sendResponse({ ok: false, error: 'Unknown ChatGPT auth message.' });
+        } catch (error) {
+            sendResponse({ ok: false, error: error?.message || String(error) });
+        }
+    })();
+
+    return true;
 });
 
 
@@ -2238,6 +2701,7 @@ if (chrome.runtime.onSuspendCanceled) {
 const bootManager = async () => {
     try {
         await ensureInitialHistoryAutoClearPurge();
+        await primeHistoryAutoClearTabTracking();
         if (chrome.storage.session) {
             const sessionState = await chrome.storage.session.get(['is_sw_awake']);
             
