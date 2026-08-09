@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.1.4",
+  "version": "27.1.5",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjEeyCdAVkbe2p2lPV/MrGctXv+sFHkvsnh3ZAEKIYEmBMfPV8my4Y2lzlIMIJqjG9BoUuG4CbNyqyEYjSd017DHquABCYySJTFAE2q+pgtGlFbDlV+mqWryxkOLb/j7DgGtEcDv0cxjW5vhr2EehN7QRqeSz6HofYBroOfdTm0Gcl/azGdDoasU1+Mr5rcPwWr0ole1X6fTViloQ2u/wsvtIgHAu1V+q61+Z8LsfE4cTR+nAJu5Amf13Y1mq5HklWMwxfCxsPthHCweYJiahGM8//7+69jkZuSa0186WA1/BAMxGEkRTU/TudGuJVHHw/7OA7zDzVEDM8wUNYoibNQIDAQAB",
   "description": "Makes everyday browsing more peaceful with BraveFox Enhancer.",
   "background": {
@@ -1340,5 +1340,14 @@
         "path": "rules/anti_webp_headers.json"
       }
     ]
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "BraveFox Enhancer",
+    "default_popup": "popup/popup.html"
   }
 }
