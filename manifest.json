@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.0.8",
+  "version": "27.1.4",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjEeyCdAVkbe2p2lPV/MrGctXv+sFHkvsnh3ZAEKIYEmBMfPV8my4Y2lzlIMIJqjG9BoUuG4CbNyqyEYjSd017DHquABCYySJTFAE2q+pgtGlFbDlV+mqWryxkOLb/j7DgGtEcDv0cxjW5vhr2EehN7QRqeSz6HofYBroOfdTm0Gcl/azGdDoasU1+Mr5rcPwWr0ole1X6fTViloQ2u/wsvtIgHAu1V+q61+Z8LsfE4cTR+nAJu5Amf13Y1mq5HklWMwxfCxsPthHCweYJiahGM8//7+69jkZuSa0186WA1/BAMxGEkRTU/TudGuJVHHw/7OA7zDzVEDM8wUNYoibNQIDAQAB",
-  "description": "Makes everyday browsing more peaceful with BraveFox Enhancer and its built-in Focus Master.",
+  "description": "Makes everyday browsing more peaceful with BraveFox Enhancer.",
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -16,13 +16,10 @@
     "webNavigation",
     "tabs",
     "nativeMessaging",
-    "alarms",
-    "identity",
-    "identity.email"
+    "alarms"
   ],
   "host_permissions": [
-    "*://*/*",
-    "https://www.googleapis.com/*"
+    "*://*/*"
   ],
   "content_scripts": [
     {
@@ -1322,11 +1319,7 @@
     {
       "resources": [
         "icons/icon48.png",
-        "html/password-protected.html",
-        "blocker/blocked.html",
-        "blocker/popup-required.html",
-        "blocker/incognito-denied.html",
-        "blocker/assets/*"
+        "html/password-protected.html"
       ],
       "matches": [
         "<all_urls>"
@@ -1339,19 +1332,6 @@
     "48": "icons/icon48.png"
   },
   "incognito": "split",
-  "action": {
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    },
-    "default_title": "Open BraveFox Focus Master",
-    "default_popup": "blocker/popup.html"
-  },
-  "options_ui": {
-    "page": "blocker/options.html",
-    "open_in_tab": true
-  },
   "declarative_net_request": {
     "rule_resources": [
       {
@@ -1359,12 +1339,6 @@
         "enabled": true,
         "path": "rules/anti_webp_headers.json"
       }
-    ]
-  },
-  "oauth2": {
-    "client_id": "917254974311-8lrggora35d6b56ghvleg5evhkq4dpal.apps.googleusercontent.com",
-    "scopes": [
-      "https://www.googleapis.com/auth/drive.appdata"
     ]
   }
 }

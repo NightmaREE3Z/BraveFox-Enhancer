@@ -1,6 +1,189 @@
-import './blocker/service.js';
-import { getTrustedSiteDescriptors, initializeTrustedSites, onTrustedSitesChanged } from './blocker/trusted-sites.js';
-import { isCompletelyExcludedHostname, isCompletelyExcludedUrl } from './blocker/shared.js';
+// BraveFox Enhancer core exclusions. These remain local to Enhancer now that
+// Focus-list management now lives in the separate standalone extension.
+const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
+    "archive.org",
+    "iltalehti.fi",
+    "is.fi",
+    "youtube.com",
+    "wikipedia.org",
+    "netflix.com",
+    "runescape.wiki",
+    "runescape.com",
+    "chatgpt.com",
+    "getpaint.net",
+    "openai.com",
+    "reddit.com",
+    "spotify.com",
+    "thesmackdownhotel.com",
+    "wiktionary.org",
+    "wwe.com",
+    "amd.com",
+    "nvidia.com",
+    "intel.com",
+    "techpowerup.com",
+    "guru3d.com",
+    "gemini.google.com",
+    "jimms.fi",
+    "verkkokauppa.com",
+    "motonet.fi",
+    "datatronic.fi",
+    "multitronic.fi",
+    "proshop.fi",
+    "tori.fi",
+    "huuto.net",
+    "hintaopas.fi",
+    "yliopistonapteekki.fi",
+    "findidfb.com",
+    "lookup-id.com",
+    "facebook.com",
+    "yle.fi",
+    "hs.fi",
+    "mtv.fi",
+    "mtvuutiset.fi",
+    "kauppalehti.fi",
+    "talouselama.fi",
+    "suomi.fi",
+    "kela.fi",
+    "kanta.fi",
+    "vero.fi",
+    "traficom.fi",
+    "poliisi.fi",
+    "finlex.fi",
+    "posti.fi",
+    "matkahuolto.fi",
+    "vr.fi",
+    "hsl.fi",
+    "ilmatieteenlaitos.fi",
+    "foreca.fi",
+    "op.fi",
+    "nordea.fi",
+    "s-pankki.fi",
+    "danskebank.fi",
+    "aktia.fi",
+    "alandsbanken.fi",
+    "poppankki.fi",
+    "saastopankki.fi",
+    "gigantti.fi",
+    "power.fi",
+    "hinta.fi",
+    "prisma.fi",
+    "k-ruoka.fi",
+    "tokmanni.fi",
+    "puuilo.fi",
+    "k-rauta.fi",
+    "bauhaus.fi",
+    "clasohlson.com",
+    "io-tech.fi",
+    "muropaketti.com",
+    "afterdawn.com",
+    "tomshardware.com",
+    "notebookcheck.net",
+    "videocardz.com",
+    "arstechnica.com",
+    "bleepingcomputer.com",
+    "neowin.net",
+    "pcgamer.com",
+    "igorslab.de",
+    "asus.com",
+    "msi.com",
+    "corsair.com",
+    "coolermaster.com",
+    "inno3d.com",
+    "galax.com",
+    "evga.com",
+    "gigabyte.com",
+    "aorus.com",
+    "asrock.com",
+    "zotac.com",
+    "palit.com",
+    "pny.com",
+    "sapphiretech.com",
+    "powercolor.com",
+    "noctua.at",
+    "bequiet.com",
+    "fractal-design.com",
+    "nzxt.com",
+    "lian-li.com",
+    "thermaltake.com",
+    "seasonic.com",
+    "kingston.com",
+    "crucial.com",
+    "micron.com",
+    "samsung.com",
+    "westerndigital.com",
+    "wd.com",
+    "sandisk.com",
+    "seagate.com",
+    "logitech.com",
+    "razer.com",
+    "steelseries.com",
+    "hyperx.com",
+    "acer.com",
+    "dell.com",
+    "hp.com",
+    "lenovo.com",
+    "framework.com",
+    "microsoft.com",
+    "apple.com",
+    "mozilla.org",
+    "firefox.com",
+    "accounts.google.com",
+    "support.google.com",
+    "developers.google.com",
+    "store.google.com",
+]);
+
+const BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES = Object.freeze([
+    Object.freeze({ host: "github.com", pathPrefix: "/paintdotnet" }),
+    Object.freeze({ host: "github.com", pathPrefix: "/copilot" }),
+]);
+
+function normalizeBraveFoxExclusionHost(value) {
+    return String(value || '').trim().toLowerCase().replace(/^\.+|\.+$/g, '').replace(/^www\./, '');
+}
+
+function normalizeBraveFoxExclusionPath(value) {
+    let path = String(value || '/').trim();
+    if (!path.startsWith('/')) path = `/${path}`;
+    path = path.replace(/\/{2,}/g, '/').replace(/\/$/, '');
+    return path || '/';
+}
+
+function isCompletelyExcludedHostname(value) {
+    const host = normalizeBraveFoxExclusionHost(value);
+    if (!host) return false;
+    if (/^translate\.google\./i.test(host)) return true;
+
+    for (const domain of BRAVEFOX_COMPLETE_EXCLUSION_HOSTS) {
+        if (host === domain || host.endsWith(`.${domain}`)) return true;
+    }
+    return false;
+}
+
+function isCompletelyExcludedUrl(value) {
+    try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+        const host = normalizeBraveFoxExclusionHost(parsed.hostname);
+        if (isCompletelyExcludedHostname(host)) return true;
+
+        const pathname = String(parsed.pathname || '/').replace(/\/{2,}/g, '/');
+        return BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.some(rule => {
+            const prefix = normalizeBraveFoxExclusionPath(rule.pathPrefix);
+            return host === rule.host && (pathname === prefix || pathname.startsWith(`${prefix}/`));
+        });
+    } catch (_) {
+        return false;
+    }
+}
+
+function getBraveFoxExclusionDescriptors() {
+    return {
+        domains: [...BRAVEFOX_COMPLETE_EXCLUSION_HOSTS],
+        pathRules: BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.map(rule => ({ ...rule }))
+    };
+}
+
 
 (function() {
 // BraveFox Enhancer "background.js" on Chromium platform
@@ -231,7 +414,7 @@ const isHistoryAutoClearHostname = (hostname) => Boolean(getHistoryAutoClearDoma
 
 const getHistoryAutoClearDomainForUrl = (url) => {
     // IMPORTANT: history auto-clear is intentionally independent from BraveFox's
-    // complete-exclusion/trusted-site policy. A site such as chatgpt.com can be fully
+    // complete-exclusion policy. A site such as chatgpt.com can be fully
     // trusted for blocking purposes while still being explicitly configured to leave no
     // browser-history trail.
     if (!url || typeof url !== 'string') return null;
@@ -479,7 +662,7 @@ const ensureInitialHistoryAutoClearPurge = async () => {
 };
 
 const updateAllowlistRules = async () => {
-    const trusted = getTrustedSiteDescriptors();
+    const trusted = getBraveFoxExclusionDescriptors();
     const domainRules = Array.from(new Set([...allowedSites, ...trusted.domains])).map(domain => ({
         urlFilter: `||${domain}/`,
         label: domain
@@ -509,16 +692,15 @@ const updateAllowlistRules = async () => {
             addRules: allowRules
         }, () => {
             if (chrome.runtime.lastError) {
-                console.error('Failed to apply Focus Master trusted-site rules:', chrome.runtime.lastError.message);
+                console.error('Failed to apply BraveFox exclusion allow rules:', chrome.runtime.lastError.message);
             } else {
-                console.log(`Applied ${allowRules.length} trusted-site DNR allow rule(s).`);
+                console.log(`Applied ${allowRules.length} BraveFox exclusion DNR allow rule(s).`);
             }
             resolve();
         });
     });
 };
 
-onTrustedSitesChanged(() => { void updateAllowlistRules(); });
 
 // Blocklist for other domains if needed
 const blockedSites = [
@@ -1329,8 +1511,7 @@ const manageDynamicRules = async (hostsList) => {
 const initializeExtension = async () => {
     console.log('Initializing extension...');
 
-    // Fetch the central trusted-site policy before cached/legacy block rules can affect navigation.
-    await initializeTrustedSites();
+    // Reassert Enhancer core exclusions before cached/legacy block rules can affect navigation.
     await updateAllowlistRules();
     
     // Check if we have cached hosts first
@@ -1358,7 +1539,7 @@ const updateBlocklist = async () => {
         {
             id: 'BraveFoxHosts',
             url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/BraveFoxHosts',
-            fallbackPath: 'blocker/lists/BraveFoxHosts'
+            fallbackPath: 'lists/BraveFoxHosts'
         },
         {
             id: 'StevenBlack',
@@ -1367,7 +1548,7 @@ const updateBlocklist = async () => {
         {
             id: 'legacyFox',
             url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/legacyFox',
-            fallbackPath: 'blocker/lists/legacyFox'
+            fallbackPath: 'lists/legacyFox'
         }
     ];
 
