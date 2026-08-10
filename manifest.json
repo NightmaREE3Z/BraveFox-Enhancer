@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.1.6",
+  "version": "27.1.8",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjEeyCdAVkbe2p2lPV/MrGctXv+sFHkvsnh3ZAEKIYEmBMfPV8my4Y2lzlIMIJqjG9BoUuG4CbNyqyEYjSd017DHquABCYySJTFAE2q+pgtGlFbDlV+mqWryxkOLb/j7DgGtEcDv0cxjW5vhr2EehN7QRqeSz6HofYBroOfdTm0Gcl/azGdDoasU1+Mr5rcPwWr0ole1X6fTViloQ2u/wsvtIgHAu1V+q61+Z8LsfE4cTR+nAJu5Amf13Y1mq5HklWMwxfCxsPthHCweYJiahGM8//7+69jkZuSa0186WA1/BAMxGEkRTU/TudGuJVHHw/7OA7zDzVEDM8wUNYoibNQIDAQAB",
   "description": "Makes everyday browsing more peaceful by filtering out content.",
   "background": {

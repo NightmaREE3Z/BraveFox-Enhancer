@@ -2574,19 +2574,62 @@
 
     // Standalone SVG instead of borrowing a generated ChatGPT sprite id. This keeps the
     // sidebar item intact even when ChatGPT rotates sprite bundles between deployments.
-    anchor.innerHTML = `
-      <div aria-hidden="true" class="relative flex items-center justify-center [opacity:var(--menu-item-icon-opacity,1)] icon">
-        <div class="absolute inset-0 flex items-center justify-center">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" focusable="false" class="icon" aria-hidden="true">
-            <rect x="3.25" y="4" width="13.5" height="12" rx="2.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
-            <circle cx="7.25" cy="8" r="1.35" fill="none" stroke="currentColor" stroke-width="1.35"/>
-            <path d="M4.75 14.15l3.45-3.45 2.45 2.45 1.75-1.75 2.85 2.85" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </div>
-      </div>
-      <div class="flex min-w-0 grow items-center gap-2.5">
-        <div class="truncate [&:has([data-marquee-text])]:min-w-0 [&:has([data-marquee-text])]:flex-1 [&:has([data-marquee-text])]:overflow-visible">${label}</div>
-      </div>`;
+    // Build it with DOM APIs rather than innerHTML so AMO's unsafe-assignment scanner stays quiet.
+    const iconHost = document.createElement('div');
+    iconHost.setAttribute('aria-hidden', 'true');
+    iconHost.className = 'relative flex items-center justify-center [opacity:var(--menu-item-icon-opacity,1)] icon';
+
+    const iconInner = document.createElement('div');
+    iconInner.className = 'absolute inset-0 flex items-center justify-center';
+
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('width', '20');
+    svg.setAttribute('height', '20');
+    svg.setAttribute('viewBox', '0 0 20 20');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('class', 'icon');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const rect = document.createElementNS(svgNs, 'rect');
+    rect.setAttribute('x', '3.25');
+    rect.setAttribute('y', '4');
+    rect.setAttribute('width', '13.5');
+    rect.setAttribute('height', '12');
+    rect.setAttribute('rx', '2.25');
+    rect.setAttribute('fill', 'none');
+    rect.setAttribute('stroke', 'currentColor');
+    rect.setAttribute('stroke-width', '1.5');
+
+    const circle = document.createElementNS(svgNs, 'circle');
+    circle.setAttribute('cx', '7.25');
+    circle.setAttribute('cy', '8');
+    circle.setAttribute('r', '1.35');
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', 'currentColor');
+    circle.setAttribute('stroke-width', '1.35');
+
+    const path = document.createElementNS(svgNs, 'path');
+    path.setAttribute('d', 'M4.75 14.15l3.45-3.45 2.45 2.45 1.75-1.75 2.85 2.85');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', 'currentColor');
+    path.setAttribute('stroke-width', '1.45');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+
+    svg.append(rect, circle, path);
+    iconInner.append(svg);
+    iconHost.append(iconInner);
+
+    const labelHost = document.createElement('div');
+    labelHost.className = 'flex min-w-0 grow items-center gap-2.5';
+
+    const labelNode = document.createElement('div');
+    labelNode.className = 'truncate [&:has([data-marquee-text])]:min-w-0 [&:has([data-marquee-text])]:flex-1 [&:has([data-marquee-text])]:overflow-visible';
+    labelNode.textContent = label;
+    labelHost.append(labelNode);
+
+    anchor.append(iconHost, labelHost);
     return anchor;
   }
 
