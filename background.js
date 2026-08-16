@@ -36,6 +36,7 @@ const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
     "findidfb.com",
     "lookup-id.com",
     "facebook.com",
+    "twitch.tv",
     "yle.fi",
     "hs.fi",
     "mtv.fi",
