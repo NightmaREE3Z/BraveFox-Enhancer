@@ -13,7 +13,6 @@ const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
     "getpaint.net",
     "openai.com",
     "reddit.com",
-    "spotify.com",
     "thesmackdownhotel.com",
     "wiktionary.org",
     "wwe.com",
@@ -798,6 +797,7 @@ const blockedSites = [
    "uptodown.com/windows/square-1-web-browser",
    "square-1-web-browser.uptodown.com",
    "square-1-web-browser.en.uptodown.com",
+   "blocked.html?type=term&trigger=user%2F3ws1lu2bwli971gvhv28yemrm&source=https%3A%2F%2Fopen.spotify.com%2Fuser%2F3ws1lu2bwli971gvhv28yemrm&attempted=",
    "uptodown.com/windows/netscape-navigator",
    "netscape-navigator.uptodown.com",
    "netscape-navigator.en.uptodown.com",
@@ -872,10 +872,6 @@ const blockedSites = [
    "grok.com",
    "grok.ai",
    "pwpix.net",
-   "instagram.com/miskaawaa/followers",
-   "instagram.com/miskaawaa/following",
-   "instagram.com/m1mmuska/followers",
-   "instagram.com/m1mmuska/following",
    "reveddit.com/v/jumalattaretPro",
    "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2F418s0mmtpve81.jpg",
    "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2F5sj5dp809wg71.jpg",
@@ -935,10 +931,10 @@ const blockedSites = [
 // Blocked TLDs for auto-closure
 const blockedTLDs = [
     '.ai', '.art', '.makeup', '.off', '.club', '.id', '.it', '.best', '.cc', '.cn', '.click', '.exposed',
-    '.you','.top', '.me', '.us', '.ru', '.vip', '.online', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', 
-    '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.asia',
-    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.one', '.ee', '.in', '.gf', '.fox', '.fun', '.fr', 
-    '.life', '.now', '.today', '.world', '.xyz', '.zone', '.nude', '.cat', '.bot', '.red', '.moe',
+    '.you','.top', '.me', '.us', '.ru', '.vip', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', '.asia',
+    '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.fr', 
+    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.one', '.ee', '.in', '.gf', '.fox', '.fun', '.cat',
+    '.life', '.now', '.today', '.world', '.zone', '.nude', '.bot', '.red', '.moe',
 ];
 
 // Memory-optimized cache with size limit and TTL
