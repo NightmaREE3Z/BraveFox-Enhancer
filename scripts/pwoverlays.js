@@ -48,7 +48,8 @@
         authTTL: 300000,
         
         targetDomains: [
-            'example.com'
+            'example.com',
+            'gemini.google.com'
         ],
         
         exactPaths: [
@@ -74,6 +75,8 @@
             'github.com/NightmaREE3Z*',
             '*github.com/NightmaREE3Z*',
             '*github.com/ungoogled-software*',
+            'github.com/copilot*',
+            'github.com/features/copilot*',
             '*gemini.google.com/gem/7b575190249c*',
             '*gemini.google.com/app/7b575190249c*',
             'gist.github.com/',
@@ -102,6 +105,8 @@
     let githubMutationObserver = null;
     let geminiMutationObserver = null;
     let chromeDevConsoleMutationObserver = null;
+    let pendingPasswordAction = null;
+    let passwordOverlayMode = 'page';
     
     function simpleHash(str) {
         let hash = 0;
@@ -282,11 +287,22 @@
                 }
                 
                 if (event.data === 'BraveFox-Unlock' || (event.data && event.data.type === 'BraveFox-Unlock')) {
-                    setAuthentication();
+                    const action = pendingPasswordAction;
+                    pendingPasswordAction = null;
                     removePasswordOverlay();
-                    showPageContent();
                     attemptCount = 0;
                     sessionStorage.removeItem(PASSWORD_CONFIG.lockoutKey);
+
+                    if (passwordOverlayMode === 'action' && typeof action === 'function') {
+                        passwordOverlayMode = 'page';
+                        try { action(); } catch {}
+                        window.dispatchEvent(new CustomEvent('bravefoxActionAuthenticated'));
+                        return;
+                    }
+
+                    passwordOverlayMode = 'page';
+                    setAuthentication();
+                    showPageContent();
                     window.dispatchEvent(new CustomEvent('bravefoxAuthenticated'));
                 }
             });
@@ -294,12 +310,13 @@
         }
     }
     
-    function createPasswordOverlay() {
+    function createPasswordOverlay(options = {}) {
         if (passwordOverlayHost && document.contains(passwordOverlayHost)) {
             return; 
         }
         
         setupIframeMessageListener();
+        passwordOverlayMode = options.mode === 'action' ? 'action' : 'page';
         
         const randomId = 'bfx-' + Math.random().toString(36).substring(2, 10);
         passwordOverlayHost = document.createElement('div');
@@ -322,6 +339,10 @@
         let targetSrc = '';
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
             targetSrc = chrome.runtime.getURL('html/password-protected.html');
+            if (passwordOverlayMode === 'action') {
+                const title = encodeURIComponent(String(options.title || 'Password required'));
+                targetSrc += `?title=${title}&compact=1`;
+            }
         }
         
         iframe.src = targetSrc;
@@ -340,6 +361,15 @@
         attachmentTarget.appendChild(passwordOverlayHost);
     }
     
+    window.BraveFoxPasswordGate = {
+        requestAction(callback, title = 'Password required') {
+            if (typeof callback !== 'function') return false;
+            pendingPasswordAction = callback;
+            createPasswordOverlay({ mode: 'action', title });
+            return true;
+        }
+    };
+
     function removePasswordOverlay() {
         if (passwordOverlayHost && passwordOverlayHost.parentNode) {
             passwordOverlayHost.parentNode.removeChild(passwordOverlayHost);
