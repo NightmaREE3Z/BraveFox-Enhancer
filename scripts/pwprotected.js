@@ -1,6 +1,6 @@
 /* pwprotected.js
  * Controls BraveFox's internal password-protected.html page.
- * Supports normal top-level protected-page routing plus legacy embedded callers.
+ * Updated 2026-08-21: password challenges are top-level extension pages only.
  */
 
 (() => {
@@ -14,6 +14,8 @@
   const COMPACT_PROMPT = PAGE_PARAMS.get('compact') === '1';
   const CHATGPT_AUTH_TARGET = PAGE_PARAMS.get('target') === 'chatgpt';
   const CHATGPT_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
+  const WEB_AUTH_TARGET = PAGE_PARAMS.get('target') === 'web';
+  const WEB_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
 
   // Build a minimal full-page scaffold in case the HTML is empty.
   function ensureBase() {
@@ -353,7 +355,7 @@
 
     container.appendChild(card);
 
-    // Always append topbar now, regardless of iframe status
+    // Always append the topbar on the full-page password screen
     page.appendChild(topbar);
     page.appendChild(container);
 
@@ -363,11 +365,46 @@
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (input.value === FIXED_PASSWORD) {
+        // General web/action password gates are always real top-level extension pages.
+        // The protected website is not left underneath an iframe or removable overlay.
+        if (WEB_AUTH_TARGET) {
+          if (!WEB_AUTH_REQUEST_ID || window !== window.top) {
+            error.textContent = 'BraveFox password request is invalid or expired.';
+            return;
+          }
+
+          submit.disabled = true;
+          input.disabled = true;
+          error.textContent = '';
+
+          try {
+            chrome.runtime.sendMessage({
+              type: 'BRAVEFOX_WEB_AUTH_APPROVE',
+              requestId: WEB_AUTH_REQUEST_ID
+            }, response => {
+              const runtimeError = chrome.runtime.lastError;
+              if (runtimeError || !response?.ok) {
+                submit.disabled = false;
+                input.disabled = false;
+                error.textContent = runtimeError?.message || response?.error || 'BraveFox password request expired.';
+                input.focus();
+              }
+              // On success the background navigates this tab back to the protected page.
+            });
+          } catch (authError) {
+            submit.disabled = false;
+            input.disabled = false;
+            error.textContent = authError?.message || 'BraveFox password request failed.';
+            input.focus();
+          }
+          return;
+        }
+
         // ChatGPT protected routes/actions always use this page as a real top-level
         // extension page. The background owns the one-time return grant so the
         // ChatGPT page cannot simply dismiss its own password UI.
         if (CHATGPT_AUTH_TARGET) {
-          if (!CHATGPT_AUTH_REQUEST_ID || window !== window.parent) {
+          if (!CHATGPT_AUTH_REQUEST_ID || window !== window.top) {
             error.textContent = 'ChatGPT password request is invalid or expired.';
             return;
           }
@@ -399,14 +436,15 @@
           return;
         }
 
-        // Legacy callers still supported for the existing system-page password flow.
-        if (window !== window.parent) {
-            window.parent.postMessage('BraveFox-Unlock', '*');
-        } else {
-            chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
-                chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
-            });
+        // Browser system-page protection also uses this page as a real top-level page.
+        if (window !== window.top) {
+            error.textContent = 'BraveFox password pages cannot be used inside a frame.';
+            return;
         }
+
+        chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
+            chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
+        });
       } else {
         error.textContent = 'Incorrect password. Try again.';
         card.animate(

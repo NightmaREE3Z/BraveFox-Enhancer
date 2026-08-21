@@ -1,4 +1,4 @@
-// BraveFox Enhancer Master Password Protection Module
+// BraveFox Enhancer Master Password Protection Module — 2026-08-21
 
 (function() {
     'use strict';
@@ -93,9 +93,7 @@
         ]
     };
     
-    let passwordOverlayHost = null;
     let isAuthenticated = false;
-    let attemptCount = 0;
     let initializationComplete = false;
     let contentHidingStyleSheet = null;
     let urlCheckInterval = null;
@@ -105,19 +103,10 @@
     let githubMutationObserver = null;
     let geminiMutationObserver = null;
     let chromeDevConsoleMutationObserver = null;
-    let pendingPasswordAction = null;
-    let passwordOverlayMode = 'page';
-    
-    function simpleHash(str) {
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            const char = str.charCodeAt(i);
-            hash = ((hash << 5) - hash) + char;
-            hash = hash & hash; 
-        }
-        return hash.toString();
-    }
-    
+    let pageGateRequestInFlight = false;
+    let pageGateRequestUrl = '';
+    let actionGateRequestInFlight = false;
+
     function matchesPattern(pattern, url) {
         const cleanUrl = url.replace(/^https?:\/\/(www\.)?/i, '').toLowerCase();
         const cleanPattern = pattern.replace(/^https?:\/\/(www\.)?/i, '').toLowerCase();
@@ -212,178 +201,120 @@
         );
     }
     
-    function isPageRefresh() {
-        const navigationFlag = sessionStorage.getItem(PASSWORD_CONFIG.navigationKey);
-        if (navigationFlag) {
-            sessionStorage.removeItem(PASSWORD_CONFIG.navigationKey);
-            return false;
-        }
-        return true;
-    }
-    
-    function setNavigationFlag() {
-        sessionStorage.setItem(PASSWORD_CONFIG.navigationKey, 'true');
-    }
-    
-    function isLockedOut() {
-        const lockoutData = sessionStorage.getItem(PASSWORD_CONFIG.lockoutKey);
-        if (!lockoutData) return false;
-        
-        const lockoutTime = parseInt(lockoutData);
-        if (Date.now() - lockoutTime < PASSWORD_CONFIG.lockoutDuration) {
-            return true;
-        } else {
-            sessionStorage.removeItem(PASSWORD_CONFIG.lockoutKey);
-            return false;
-        }
-    }
-    
-    function setLockout() {
-        sessionStorage.setItem(PASSWORD_CONFIG.lockoutKey, Date.now().toString());
-    }
-    
-    function checkAuthentication() {
-        const hostname = window.location.hostname;
-        const expectedToken = simpleHash(PASSWORD_CONFIG.password + hostname);
-        let authenticated = false;
-
+    function sendRuntimeMessage(message, callback) {
         try {
-            const authRaw = sessionStorage.getItem(PASSWORD_CONFIG.sessionKey);
-            if (authRaw) {
-                try {
-                    const parsed = JSON.parse(authRaw);
-                    const okToken = parsed && parsed.token === expectedToken;
-                    const okTime = parsed && typeof parsed.ts === 'number' && (Date.now() - parsed.ts) <= PASSWORD_CONFIG.authTTL;
-                    if (okToken && okTime) {
-                        authenticated = true;
-                    } else if (okToken && !okTime) {
-                        sessionStorage.removeItem(PASSWORD_CONFIG.sessionKey);
-                    }
-                } catch {
-                    if (authRaw === expectedToken) {
-                        sessionStorage.removeItem(PASSWORD_CONFIG.sessionKey);
-                    }
-                }
+            if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+                callback?.(null, new Error('BraveFox runtime messaging is unavailable.'));
+                return false;
             }
-        } catch {}
-        
-        return authenticated;
-    }
-    
-    function setAuthentication() {
-        const token = simpleHash(PASSWORD_CONFIG.password + window.location.hostname);
-        const payload = JSON.stringify({ token, ts: Date.now() });
-        try {
-            sessionStorage.setItem(PASSWORD_CONFIG.sessionKey, payload);
-        } catch {}
-        isAuthenticated = true;
-    }
 
-    function setupIframeMessageListener() {
-        if (!window.braveFoxGlobalListenerAdded) {
-            window.addEventListener('message', (event) => {
-                if (typeof chrome !== 'undefined' && chrome.runtime && event.origin !== `chrome-extension://${chrome.runtime.id}`) {
-                    return; 
-                }
-                
-                if (event.data === 'BraveFox-Unlock' || (event.data && event.data.type === 'BraveFox-Unlock')) {
-                    const action = pendingPasswordAction;
-                    pendingPasswordAction = null;
-                    removePasswordOverlay();
-                    attemptCount = 0;
-                    sessionStorage.removeItem(PASSWORD_CONFIG.lockoutKey);
-
-                    if (passwordOverlayMode === 'action' && typeof action === 'function') {
-                        passwordOverlayMode = 'page';
-                        try { action(); } catch {}
-                        window.dispatchEvent(new CustomEvent('bravefoxActionAuthenticated'));
-                        return;
-                    }
-
-                    passwordOverlayMode = 'page';
-                    setAuthentication();
-                    showPageContent();
-                    window.dispatchEvent(new CustomEvent('bravefoxAuthenticated'));
-                }
+            chrome.runtime.sendMessage(message, response => {
+                const runtimeError = chrome.runtime.lastError;
+                callback?.(response || null, runtimeError ? new Error(runtimeError.message) : null);
             });
-            window.braveFoxGlobalListenerAdded = true;
+            return true;
+        } catch (error) {
+            callback?.(null, error);
+            return false;
         }
     }
-    
-    function createPasswordOverlay(options = {}) {
-        if (passwordOverlayHost && document.contains(passwordOverlayHost)) {
-            return; 
+
+    function requestPagePasswordGate() {
+        const currentUrl = window.location.href;
+
+        if (pageGateRequestInFlight && pageGateRequestUrl === currentUrl) {
+            hidePageContent();
+            return false;
         }
-        
-        setupIframeMessageListener();
-        passwordOverlayMode = options.mode === 'action' ? 'action' : 'page';
-        
-        const randomId = 'bfx-' + Math.random().toString(36).substring(2, 10);
-        passwordOverlayHost = document.createElement('div');
-        passwordOverlayHost.id = randomId;
-        passwordOverlayHost.style.cssText = `
-            all: initial !important;
-            position: fixed !important;
-            top: 0 !important;
-            left: 0 !important;
-            width: 100vw !important;
-            height: 100vh !important;
-            z-index: 2147483647 !important;
-            pointer-events: auto !important;
-            display: block !important;
-        `;
-        
-        const shadow = passwordOverlayHost.attachShadow({ mode: 'closed' });
-        const iframe = document.createElement('iframe');
-        
-        let targetSrc = '';
-        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
-            targetSrc = chrome.runtime.getURL('html/password-protected.html');
-            if (passwordOverlayMode === 'action') {
-                const title = encodeURIComponent(String(options.title || 'Password required'));
-                targetSrc += `?title=${title}&compact=1`;
+
+        pageGateRequestInFlight = true;
+        pageGateRequestUrl = currentUrl;
+        isAuthenticated = false;
+        hidePageContent();
+
+        const started = sendRuntimeMessage({
+            type: 'BRAVEFOX_WEB_AUTH_GATE',
+            returnUrl: currentUrl,
+            title: 'Saatana! Sivu salasanasuojattu'
+        }, (response, error) => {
+            pageGateRequestInFlight = false;
+
+            if (error) {
+                console.warn('BraveFox: Password gate request failed:', error.message);
+                hidePageContent();
+                setTimeout(() => {
+                    if (shouldProtectPage() && window.location.href === currentUrl) {
+                        requestPagePasswordGate();
+                    }
+                }, 1000);
+                return;
             }
+
+            if (response?.unlocked) {
+                isAuthenticated = true;
+                showPageContent();
+                window.dispatchEvent(new CustomEvent('bravefoxAuthenticated'));
+                return;
+            }
+
+            // The background owns the top-level navigation to the internal password page.
+            // Keep this page blank until it is replaced.
+            hidePageContent();
+        });
+
+        if (!started) {
+            pageGateRequestInFlight = false;
+            hidePageContent();
         }
-        
-        iframe.src = targetSrc;
-        iframe.style.cssText = `
-            width: 100% !important;
-            height: 100% !important;
-            border: none !important;
-            background: rgba(0, 0, 0, 0.95) !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            display: block !important;
-        `;
-        
-        shadow.appendChild(iframe);
-        const attachmentTarget = document.body || document.documentElement;
-        attachmentTarget.appendChild(passwordOverlayHost);
+
+        return false;
     }
-    
+
     window.BraveFoxPasswordGate = {
-        requestAction(callback, title = 'Password required') {
+        requestAction(callback, title = 'Password required', actionKey = 'generic-action') {
             if (typeof callback !== 'function') return false;
-            pendingPasswordAction = callback;
-            createPasswordOverlay({ mode: 'action', title });
+            if (actionGateRequestInFlight) return true;
+
+            actionGateRequestInFlight = true;
+
+            const started = sendRuntimeMessage({
+                type: 'BRAVEFOX_WEB_ACTION_GATE',
+                returnUrl: window.location.href,
+                title: String(title || 'Password required'),
+                actionKey: String(actionKey || 'generic-action')
+            }, (response, error) => {
+                actionGateRequestInFlight = false;
+
+                if (error) {
+                    console.warn('BraveFox: Action password gate request failed:', error.message);
+                    return;
+                }
+
+                if (response?.unlocked) {
+                    try { callback(); } catch {}
+                    window.dispatchEvent(new CustomEvent('bravefoxActionAuthenticated'));
+                }
+                // If not unlocked, the background replaces this tab with the top-level
+                // password page. After approval it returns here; the next protected
+                // action consumes the one-time action grant.
+            });
+
+            if (!started) {
+                actionGateRequestInFlight = false;
+                return false;
+            }
+
             return true;
         }
     };
 
-    function removePasswordOverlay() {
-        if (passwordOverlayHost && passwordOverlayHost.parentNode) {
-            passwordOverlayHost.parentNode.removeChild(passwordOverlayHost);
-            passwordOverlayHost = null;
-        }
-    }
-    
     function hidePageContent() {
         if (contentHidingStyleSheet && document.contains(contentHidingStyleSheet)) {
-            return; 
+            return;
         }
-        
+
         const cssRules = [
-            'body > *:not([id^="bfx-"]) { visibility: hidden !important; opacity: 0 !important; }',
+            'body > * { visibility: hidden !important; opacity: 0 !important; }',
             'body { background: #000 !important; }',
             'nav, header, .header, .navigation, .navbar { visibility: hidden !important; opacity: 0 !important; }',
             'main, .main, .content, .container, #root, #app { visibility: hidden !important; opacity: 0 !important; }',
@@ -394,25 +325,25 @@
             'chat-app, .gemini-chat-app, [class*="chat-app"], [class*="gemini"], model-response, user-query { visibility: hidden !important; opacity: 0 !important; }',
             'cws-developer-console, cws-dashboard, [class*="cws-"], c-wiz { visibility: hidden !important; opacity: 0 !important; }'
         ];
-        
+
         contentHidingStyleSheet = document.createElement('style');
         contentHidingStyleSheet.type = 'text/css';
-        contentHidingStyleSheet.id = 'bfx-style-' + Math.random().toString(36).substring(2, 8);
+        contentHidingStyleSheet.id = 'bfx-gate-style-' + Math.random().toString(36).substring(2, 8);
         contentHidingStyleSheet.textContent = cssRules.join('\n');
-        
+
         const target = document.head || document.documentElement;
         target.appendChild(contentHidingStyleSheet);
     }
-    
+
     function showPageContent() {
         if (contentHidingStyleSheet && contentHidingStyleSheet.parentNode) {
             contentHidingStyleSheet.parentNode.removeChild(contentHidingStyleSheet);
             contentHidingStyleSheet = null;
         }
-        
+
         document.documentElement.style.visibility = 'visible';
         document.documentElement.style.opacity = '1';
-        
+
         if (document.body) {
             document.body.style.visibility = 'visible';
             document.body.style.opacity = '1';
@@ -420,29 +351,22 @@
             document.body.style.background = '';
         }
     }
-    
+
     function handleUrlChange() {
         const currentUrl = window.location.href;
-        
+
         if (currentUrl !== lastCheckedUrl) {
             lastCheckedUrl = currentUrl;
-            setNavigationFlag();
-            
+
             if (shouldProtectPage()) {
-                if (!checkAuthentication()) {
-                    createPasswordOverlay();
-                    hidePageContent();
-                } else {
-                    showPageContent();
-                    removePasswordOverlay();
-                }
+                requestPagePasswordGate();
             } else {
+                isAuthenticated = true;
                 showPageContent();
-                removePasswordOverlay();
             }
         }
     }
-    
+
     function setupGitHubNavigation() {
         if (!window.location.hostname.toLowerCase().includes('github.com')) return;
         
@@ -651,35 +575,11 @@
             showPageContent();
             return true;
         }
-        
-        const isRefresh = isPageRefresh();
-        
-        if (isRefresh) {
-            isAuthenticated = checkAuthentication();
-            if (!isAuthenticated) {
-                createPasswordOverlay(); 
-                hidePageContent(); 
-                return false;
-            } else {
-                showPageContent();
-                removePasswordOverlay();
-                return true;
-            }
-        } else {
-            isAuthenticated = checkAuthentication();
-        }
-        
-        if (isAuthenticated) {
-            showPageContent();
-            removePasswordOverlay();
-            return true;
-        } else {
-            createPasswordOverlay(); 
-            hidePageContent(); 
-            return false;
-        }
+
+        requestPagePasswordGate();
+        return false;
     }
-    
+
     function initialize() {
         if (initializationComplete) return;
         initializationComplete = true;
@@ -694,19 +594,15 @@
         
         const antiTamperObserver = new MutationObserver(() => {
             if (!isAuthenticated && shouldProtectPage()) {
-                if (!passwordOverlayHost || !document.contains(passwordOverlayHost)) {
-                    passwordOverlayHost = null; 
-                    createPasswordOverlay();
-                }
                 if (!contentHidingStyleSheet || !document.contains(contentHidingStyleSheet)) {
-                    contentHidingStyleSheet = null; 
+                    contentHidingStyleSheet = null;
                     hidePageContent();
                 }
             }
         });
-        
+
         antiTamperObserver.observe(document.documentElement, { childList: true, subtree: true });
-        
+
         const spaNavigationObserver = new MutationObserver(() => {
             setTimeout(handleUrlChange, 100);
         });
@@ -736,20 +632,19 @@
         if (geminiMutationObserver) geminiMutationObserver.disconnect();
         if (chromeDevConsoleMutationObserver) chromeDevConsoleMutationObserver.disconnect();
         
-        removePasswordOverlay();
         if (contentHidingStyleSheet && contentHidingStyleSheet.parentNode) {
             contentHidingStyleSheet.parentNode.removeChild(contentHidingStyleSheet);
         }
     });
     
     if (shouldProtectPage()) {
-        if (!checkAuthentication()) {
-            document.documentElement.style.background = '#000';
-            if (document.body) {
-                document.body.style.background = '#000';
-            }
+        document.documentElement.style.background = '#000';
+        document.documentElement.style.visibility = 'hidden';
+        if (document.body) {
+            document.body.style.background = '#000';
+            document.body.style.visibility = 'hidden';
         }
-        
+
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', initialize);
         } else {
