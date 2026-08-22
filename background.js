@@ -152,6 +152,7 @@ function normalizeBraveFoxExclusionPath(value) {
 function isCompletelyExcludedHostname(value) {
     const host = normalizeBraveFoxExclusionHost(value);
     if (!host) return false;
+    if (host === 'twitch.tv' || host.endsWith('.twitch.tv')) return true;
     if (/^translate\.google\./i.test(host)) return true;
 
     for (const domain of BRAVEFOX_COMPLETE_EXCLUSION_HOSTS) {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.4.0",
+  "version": "27.4.1",
   "description": "Makes everyday browsing more peaceful by filtering out content.",
   "background": {
     "service_worker": "background.js",
@@ -29,7 +29,11 @@
       "js": [
         "scripts/pwa-navigation.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -319,7 +323,8 @@
         "*://translate.google.yt/*",
         "*://translate.google.za/*",
         "*://translate.google.zm/*",
-        "*://translate.google.zw/*"
+        "*://translate.google.zw/*",
+        "*://*.twitch.tv/*"
       ]
     },
     {
@@ -612,7 +617,8 @@
         "*://translate.google.yt/*",
         "*://translate.google.za/*",
         "*://translate.google.zm/*",
-        "*://translate.google.zw/*"
+        "*://translate.google.zw/*",
+        "*://*.twitch.tv/*"
       ]
     },
     {
@@ -626,7 +632,11 @@
       "js": [
         "scripts/facebook.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -909,7 +919,11 @@
       "js": [
         "scripts/google.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -919,7 +933,11 @@
       "js": [
         "scripts/youtube.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -942,7 +960,11 @@
       "js": [
         "scripts/extra.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -952,7 +974,11 @@
       "js": [
         "scripts/instagram.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -961,7 +987,11 @@
       "js": [
         "scripts/blocksite.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -970,7 +1000,11 @@
       "js": [
         "scripts/importexport.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -985,7 +1019,11 @@
       ],
       "run_at": "document_start",
       "world": "MAIN",
-      "all_frames": true
+      "all_frames": true,
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -997,7 +1035,11 @@
       "js": [
         "scripts/archive.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -1008,7 +1050,11 @@
       "js": [
         "scripts/blogger.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -1017,7 +1063,11 @@
       "js": [
         "scripts/wrestling.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     },
     {
       "matches": [
@@ -1307,7 +1357,8 @@
         "*://translate.google.yt/*",
         "*://translate.google.za/*",
         "*://translate.google.zm/*",
-        "*://translate.google.zw/*"
+        "*://translate.google.zw/*",
+        "*://*.twitch.tv/*"
       ]
     },
     {
@@ -1317,7 +1368,11 @@
       "js": [
         "scripts/chatgpt.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "exclude_matches": [
+        "*://twitch.tv/*",
+        "*://*.twitch.tv/*"
+      ]
     }
   ],
   "web_accessible_resources": [
