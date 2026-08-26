@@ -126,6 +126,7 @@ const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
     "apple.com",
     "mozilla.org",
     "firefox.com",
+    "afiyukent.one",
     "accounts.google.com",
     "support.google.com",
     "developers.google.com",
@@ -932,10 +933,10 @@ const blockedSites = [
 // Blocked TLDs for auto-closure
 const blockedTLDs = [
     '.ai', '.art', '.makeup', '.off', '.club', '.id', '.it', '.best', '.cc', '.cn', '.click', '.exposed',
-    '.you','.top', '.me', '.us', '.ru', '.vip', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', '.asia',
+    '.you','.top', '.me', '.us', '.vip', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', '.asia', '.ee',
     '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.fr', 
-    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.one', '.ee', '.in', '.gf', '.fox', '.fun', '.cat',
-    '.life', '.now', '.today', '.world', '.zone', '.nude', '.bot', '.red', '.moe',
+    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.in', '.gf', '.fox', '.moe', '.cat', '.nude',
+    '.life', '.now', '.today', '.world', '.zone', '.bot', '.red', '.fun', 
 ];
 
 // Memory-optimized cache with size limit and TTL

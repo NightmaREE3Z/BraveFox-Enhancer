@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.4.4",
+  "version": "27.4.8",
   "description": "Makes everyday browsing more peaceful by filtering out content.",
   "background": {
     "service_worker": "background.js",
