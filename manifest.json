@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "27.5.1",
+  "version": "27.6.0",
   "description": "Makes everyday browsing more peaceful by filtering out content.",
   "background": {
     "service_worker": "background.js",
@@ -968,6 +968,18 @@
     },
     {
       "matches": [
+        "https://instagram.com/*",
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "scripts/igmainworld.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://instagram.com/*",
         "https://www.instagram.com/*",
         "https://www.threads.net/*"
       ],

@@ -26,20 +26,16 @@ console.log('[Wrestling Filter] chrome.storage.local available inside wrestling.
 
     const manualBans = [
         // Manual fallback aliases for names SDH roster/female slicing can miss or cache late.
-        '/wrestlers/pj-vasa',
-        '/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english',
-        '/wrestlers/nikita-naridian', '/wrestlers/riho', '/wrestlers/thekla',
-        '/wrestlers/dani-sekelsky', '/wrestlers/kelly-kelly', '/wrestlers/alba-fyre', 
-        '/roster/wwe2k26/alundra-blayze', '/wrestlers/roxxi', '/wrestlers/zelina-vega', 
-        '/wrestlers/rosita', '/wrestlers/lita', '/wrestlers/chyna', '/wrestlers/maryse', 
-        '/wrestlers/aksana', '/wrestlers/kaitlyn', '/wrestlers/layla', '/wrestlers/tamina', 
-        '/wrestlers/melina', '/wrestlers/jacqueline', '/wrestlers/odb', '/wrestlers/asya', 
-        '/wrestlers/debra', '/wrestlers/lana', '/wrestlers/sable', '/wrestlers/tori', 
-        '/wrestlers/carmella', '/wrestlers/raquel', '/wrestlers/kamille', '/wrestlers/maxine', 
-        '/wrestlers/cherry', '/wrestlers/sarita', '/wrestlers/shaniqua', '/wrestlers/francine', 
-        '/wrestlers/trinity', '/wrestlers/ivy-nile', '/wrestlers/aj-lee', '/wrestlers/mia-yim', 
-        '/wrestlers/gail-kim', '/wrestlers/eve-torres', '/wrestlers/dawn-marie', '/wrestlers/joy-giovanni', 
-        '/wrestlers/cora-jade', '/wrestlers/taya-valkyrie', '/wrestlers/brie-bella', '/wrestlers/su-yung'
+        '/wrestlers/pj-vasa', '/wrestlers/taya-valkyrie', '/wrestlers/brie-bella', '/wrestlers/su-yung', '/wrestlers/riho', 
+        '/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english', '/wrestlers/nikita-naridian', 
+	'/wrestlers/thekla', '/wrestlers/julia', '/wrestlers/dani-sekelsky', '/wrestlers/kelly-kelly', '/wrestlers/alba-fyre', 
+        '/roster/wwe2k26/alundra-blayze', '/wrestlers/roxxi', '/wrestlers/zelina-vega', '/wrestlers/rosita', '/wrestlers/lita', 
+	'/wrestlers/chyna', '/wrestlers/maryse', '/wrestlers/aksana', '/wrestlers/kaitlyn', '/wrestlers/layla', '/wrestlers/asya',
+	'/wrestlers/tamina', '/wrestlers/melina', '/wrestlers/jacqueline', '/wrestlers/odb',  '/wrestlers/debra', '/wrestlers/lana', 
+	'/wrestlers/sable', '/wrestlers/tori', '/wrestlers/carmella', '/wrestlers/raquel', '/wrestlers/kamille', '/wrestlers/maxine', 
+        '/wrestlers/cherry', '/wrestlers/sarita', '/wrestlers/shaniqua', '/wrestlers/francine', '/wrestlers/trinity', '/wrestlers/aj-lee', 
+	'/wrestlers/mia-yim', '/wrestlers/cora-jade',  '/wrestlers/gail-kim', '/wrestlers/eve-torres', '/wrestlers/dawn-marie', 
+	'/wrestlers/joy-giovanni', '/wrestlers/ivy-nile'        
     ];
 
     const doNotBroadcast = [

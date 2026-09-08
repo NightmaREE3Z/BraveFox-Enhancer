@@ -110,6 +110,20 @@
     'o4-mini'
   ]);
 
+  // === Thinking-effort Instant lock ==============================================
+  // Regular chat currently exposes three effort stops: Instant / Medium / High
+  // (Välitön / Keskitaso / Korkea). BraveFox leaves Medium and High native, but
+  // blocks the minimum/Instant stop at the interaction boundary.
+  const THINKING_EFFORT_SLIDER_SELECTOR = '[role="slider"], input[type="range"]';
+  const THINKING_EFFORT_INSTANT_LABELS = new Set(['välitön', 'valiton', 'instant']);
+  const THINKING_EFFORT_MEDIUM_LABELS = new Set(['keskitaso', 'medium']);
+  const THINKING_EFFORT_HIGH_LABELS = new Set(['korkea', 'high']);
+  const THINKING_EFFORT_CONTEXT_TERMS = [
+    'päättelypanostus', 'paattelypanostus', 'reasoning effort',
+    'ajatteluaika', 'thinking time', 'thinking effort'
+  ];
+  const THINKING_EFFORT_INSTANT_CUTOFF = 0.25;
+
   // === Plugins vault ============================================================
   // The supplied + button uses this sprite fragment. A card showing that + is an
   // installable/uninstalled catalog entry; installed/connected cards use some other
@@ -222,6 +236,9 @@
 
   const replayAllowedButtons = new WeakSet();
   const replayAllowedPluginButtons = new WeakSet();
+  const thinkingEffortRepairing = new WeakSet();
+  let activeThinkingEffortSlider = null;
+  let activeThinkingEffortPointerId = null;
 
   // Pre-arm protected pages at document_start. On a direct /plugins or /gpts load,
   // ChatGPT never gets a paint before BraveFox either consumes a one-time unlock grant
@@ -238,6 +255,7 @@
   void synchronizeRoute();
   installNavigationGuards();
   installInteractionGuards();
+  installThinkingEffortInstantLock();
   installEscapeHatchObserver();
   configureRouteObserver();
   scheduleGeneralUiScan(true);
@@ -1150,6 +1168,292 @@
       if (event.key !== 'Enter' && event.key !== ' ') return;
       if (isLikelyMenuTrigger(event.target)) scheduleGeneralUiScan(false);
     }, true);
+  }
+
+  function installThinkingEffortInstantLock() {
+    const cancelInstantInteraction = event => {
+      try { event.preventDefault(); } catch {}
+      try { event.stopPropagation(); } catch {}
+      try { event.stopImmediatePropagation(); } catch {}
+    };
+
+    const scheduleRepair = slider => {
+      if (!(slider instanceof Element)) return;
+      queueMicrotask(() => enforceThinkingEffortSliderFloor(slider));
+      window.setTimeout(() => enforceThinkingEffortSliderFloor(slider), 40);
+    };
+
+    document.addEventListener('pointerdown', event => {
+      const slider = findThinkingEffortSliderForEvent(event);
+      if (!slider) return;
+
+      activeThinkingEffortSlider = slider;
+      activeThinkingEffortPointerId = Number.isFinite(event.pointerId) ? event.pointerId : null;
+
+      if (thinkingEffortPointerTargetsInstant(slider, event.clientX)) {
+        cancelInstantInteraction(event);
+        scheduleRepair(slider);
+      }
+    }, true);
+
+    document.addEventListener('pointermove', event => {
+      const slider = activeThinkingEffortSlider;
+      if (!slider?.isConnected) return;
+      if (activeThinkingEffortPointerId !== null && event.pointerId !== activeThinkingEffortPointerId) return;
+      if (!thinkingEffortPointerTargetsInstant(slider, event.clientX)) return;
+
+      cancelInstantInteraction(event);
+      scheduleRepair(slider);
+    }, true);
+
+    const finishPointerInteraction = event => {
+      const slider = activeThinkingEffortSlider;
+      if (slider?.isConnected && Number.isFinite(event.clientX) && thinkingEffortPointerTargetsInstant(slider, event.clientX)) {
+        cancelInstantInteraction(event);
+        scheduleRepair(slider);
+      }
+      activeThinkingEffortSlider = null;
+      activeThinkingEffortPointerId = null;
+    };
+
+    document.addEventListener('pointerup', finishPointerInteraction, true);
+    document.addEventListener('pointercancel', finishPointerInteraction, true);
+
+    document.addEventListener('click', event => {
+      if (isThinkingEffortTriggerControl(event.target)) {
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 0);
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 60);
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 160);
+      }
+
+      const slider = findThinkingEffortSliderForEvent(event);
+      if (!slider || !Number.isFinite(event.clientX)) return;
+      if (!thinkingEffortPointerTargetsInstant(slider, event.clientX)) return;
+
+      cancelInstantInteraction(event);
+      scheduleRepair(slider);
+    }, true);
+
+    document.addEventListener('keydown', event => {
+      if ((event.key === 'Enter' || event.key === ' ') && isThinkingEffortTriggerControl(event.target)) {
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 0);
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 60);
+        window.setTimeout(() => enforceThinkingEffortFloor(document), 160);
+      }
+
+      const slider = findThinkingEffortSliderForEvent(event);
+      if (!slider) return;
+
+      const key = String(event.key || '');
+      if (key === 'Home') {
+        cancelInstantInteraction(event);
+        scheduleRepair(slider);
+        return;
+      }
+
+      if (key === 'ArrowLeft' || key === 'ArrowDown' || key === 'PageDown') {
+        if (isThinkingEffortAtOrBelowMedium(slider)) {
+          cancelInstantInteraction(event);
+          scheduleRepair(slider);
+          return;
+        }
+        scheduleRepair(slider);
+      }
+    }, true);
+
+    for (const eventName of ['input', 'change', 'focusin']) {
+      document.addEventListener(eventName, event => {
+        const slider = findThinkingEffortSliderForEvent(event);
+        if (!slider) return;
+        if (eventName !== 'focusin' && isThinkingEffortInstant(slider)) cancelInstantInteraction(event);
+        scheduleRepair(slider);
+      }, true);
+    }
+  }
+
+  function isThinkingEffortTriggerControl(target) {
+    if (!(target instanceof Element)) return false;
+    const control = target.closest('button, [role="button"], [aria-haspopup="menu"], [aria-haspopup="listbox"]');
+    if (!control) return false;
+    const context = normalizeText([
+      control.textContent || '',
+      control.getAttribute('aria-label') || '',
+      control.getAttribute('title') || ''
+    ].join(' '));
+    return THINKING_EFFORT_CONTEXT_TERMS.some(term => context.includes(term));
+  }
+
+  function getThinkingEffortSliderCandidates(scope = document) {
+    const result = [];
+    if (scope instanceof Element && scope.matches?.(THINKING_EFFORT_SLIDER_SELECTOR)) result.push(scope);
+    if (typeof scope?.querySelectorAll === 'function') {
+      for (const slider of scope.querySelectorAll(THINKING_EFFORT_SLIDER_SELECTOR)) result.push(slider);
+    }
+    return result;
+  }
+
+  function getThinkingEffortLabel(slider) {
+    if (!(slider instanceof Element)) return '';
+
+    const ownValues = [
+      slider.getAttribute('aria-valuetext'),
+      slider.getAttribute('aria-label'),
+      slider.getAttribute('title')
+    ];
+    for (const value of ownValues) {
+      const normalized = normalizeText(value);
+      if (THINKING_EFFORT_INSTANT_LABELS.has(normalized)) return 'instant';
+      if (THINKING_EFFORT_MEDIUM_LABELS.has(normalized)) return 'medium';
+      if (THINKING_EFFORT_HIGH_LABELS.has(normalized)) return 'high';
+    }
+
+    let node = slider.parentElement;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      const context = normalizeText(node.textContent);
+      if (!context || context.length > 180) continue;
+      const words = context.split(/[^a-z0-9äöå]+/).filter(Boolean);
+      if (words.some(word => THINKING_EFFORT_INSTANT_LABELS.has(word))) return 'instant';
+      if (words.some(word => THINKING_EFFORT_MEDIUM_LABELS.has(word))) return 'medium';
+      if (words.some(word => THINKING_EFFORT_HIGH_LABELS.has(word))) return 'high';
+    }
+
+    return '';
+  }
+
+  function isThinkingEffortSlider(slider) {
+    if (!(slider instanceof Element) || !slider.matches?.(THINKING_EFFORT_SLIDER_SELECTOR)) return false;
+
+    const ownContext = normalizeText([
+      slider.getAttribute('aria-label') || '',
+      slider.getAttribute('aria-valuetext') || '',
+      slider.getAttribute('title') || '',
+      slider.getAttribute('name') || ''
+    ].join(' '));
+    if (THINKING_EFFORT_CONTEXT_TERMS.some(term => ownContext.includes(term))) return true;
+    if (getThinkingEffortLabel(slider)) return true;
+
+    let node = slider.parentElement;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      const context = normalizeText(node.textContent);
+      if (!context || context.length > 240) continue;
+      if (THINKING_EFFORT_CONTEXT_TERMS.some(term => context.includes(term))) return true;
+    }
+
+    return false;
+  }
+
+  function findThinkingEffortSliderForEvent(event) {
+    const path = typeof event?.composedPath === 'function' ? event.composedPath() : [];
+    const seen = new Set();
+
+    const inspect = node => {
+      if (!(node instanceof Element) || seen.has(node)) return null;
+      seen.add(node);
+      if (node.matches?.(THINKING_EFFORT_SLIDER_SELECTOR) && isThinkingEffortSlider(node)) return node;
+      if (typeof node.querySelectorAll !== 'function') return null;
+      for (const slider of node.querySelectorAll(THINKING_EFFORT_SLIDER_SELECTOR)) {
+        if (isThinkingEffortSlider(slider)) return slider;
+      }
+      return null;
+    };
+
+    for (let i = 0; i < path.length && i < 8; i += 1) {
+      const found = inspect(path[i]);
+      if (found) return found;
+    }
+
+    return inspect(event?.target);
+  }
+
+  function readThinkingEffortRange(slider) {
+    if (!(slider instanceof Element)) return null;
+    const read = (attr, fallback) => {
+      const raw = slider.getAttribute(attr);
+      const value = raw === null || raw === '' ? Number(fallback) : Number(raw);
+      return Number.isFinite(value) ? value : NaN;
+    };
+
+    const min = read('aria-valuemin', slider instanceof HTMLInputElement ? slider.min : NaN);
+    const max = read('aria-valuemax', slider instanceof HTMLInputElement ? slider.max : NaN);
+    const now = read('aria-valuenow', slider instanceof HTMLInputElement ? slider.value : NaN);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(now) || max <= min) return null;
+
+    return { min, max, now, medium: min + ((max - min) / 2) };
+  }
+
+  function isThinkingEffortInstant(slider) {
+    if (!isThinkingEffortSlider(slider)) return false;
+    const range = readThinkingEffortRange(slider);
+    if (range) return range.now <= range.min + ((range.max - range.min) * 0.125);
+    return getThinkingEffortLabel(slider) === 'instant';
+  }
+
+  function isThinkingEffortAtOrBelowMedium(slider) {
+    if (!isThinkingEffortSlider(slider)) return false;
+    const range = readThinkingEffortRange(slider);
+    if (range) return range.now <= range.medium + ((range.max - range.min) * 0.08);
+    const label = getThinkingEffortLabel(slider);
+    return label === 'instant' || label === 'medium';
+  }
+
+  function getThinkingEffortInteractionRect(slider) {
+    if (!(slider instanceof Element)) return null;
+    const sliderRect = slider.getBoundingClientRect?.();
+    if (sliderRect && sliderRect.width >= 120 && sliderRect.height > 0 && sliderRect.height <= 70) return sliderRect;
+
+    let node = slider.parentElement;
+    for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      const rect = node.getBoundingClientRect?.();
+      if (!rect || rect.width < 120 || rect.height <= 0 || rect.height > 70) continue;
+      return rect;
+    }
+    return sliderRect || null;
+  }
+
+  function thinkingEffortPointerTargetsInstant(slider, clientX) {
+    if (!isThinkingEffortSlider(slider) || !Number.isFinite(clientX)) return false;
+    const rect = getThinkingEffortInteractionRect(slider);
+    if (!rect || rect.width <= 0) return false;
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return fraction <= THINKING_EFFORT_INSTANT_CUTOFF;
+  }
+
+  function enforceThinkingEffortSliderFloor(slider) {
+    if (!slider?.isConnected || !isThinkingEffortSlider(slider) || !isThinkingEffortInstant(slider)) return false;
+    if (thinkingEffortRepairing.has(slider)) return true;
+
+    thinkingEffortRepairing.add(slider);
+    try {
+      if (slider instanceof HTMLInputElement && slider.type === 'range') {
+        const range = readThinkingEffortRange(slider);
+        if (!range) return false;
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (valueSetter) valueSetter.call(slider, String(range.medium));
+        else slider.value = String(range.medium);
+        slider.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        slider.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        return true;
+      }
+
+      try { slider.focus({ preventScroll: true }); } catch { try { slider.focus(); } catch {} }
+      slider.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true
+      }));
+      slider.dispatchEvent(new KeyboardEvent('keyup', {
+        key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true
+      }));
+      return true;
+    } finally {
+      window.setTimeout(() => thinkingEffortRepairing.delete(slider), 80);
+    }
+  }
+
+  function enforceThinkingEffortFloor(scope = document) {
+    for (const slider of getThinkingEffortSliderCandidates(scope)) {
+      if (isThinkingEffortSlider(slider) && isThinkingEffortInstant(slider)) {
+        enforceThinkingEffortSliderFloor(slider);
+      }
+    }
   }
 
   function isLikelyMenuTrigger(target) {
@@ -2915,6 +3219,7 @@
     applyAccountAndSettingsCleanup(scope);
     polishSidebarNavigation();
     removePluginFeaturedPromo(scope);
+    enforceThinkingEffortFloor(scope);
     forEachMatch(scope, 'div[role="menuitem"]', item => {
       const firstLine = normalizeText(String(item.textContent || '').split('\n')[0]);
       if (MODELS_TO_REMOVE.has(firstLine)) item.remove();

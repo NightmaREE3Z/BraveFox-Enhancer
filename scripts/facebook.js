@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         FBCleaner 27.3.5
-// @date      	 2026-08-23
+// @name         FBCleaner 27.5.2
+// @date      	 2026-09-05
 // @description  Makes my Facebook experience less terrible.
 // @match        *://*.facebook.com/*
 // @grant        none
@@ -11,7 +11,7 @@
 'use strict';
 
 // ============================================================
-// BRAVEFOX FACEBOOK.JS NAVIGATION INDEX (v50)
+// BRAVEFOX FACEBOOK.JS NAVIGATION INDEX (v59)
 // Search these exact labels to jump around this single-file build:
 //   [LIFECYCLE]        timers, observers, cleanup, throttling
 //   [NATIVE-SURFACES]  notifications, comments, dialogs, Stories
@@ -2938,6 +2938,7 @@ const __fbNativeHydrationSlotRefCountV53 = new Map();
 const __fbNativeHydrationReleaseQueuedV53 = new WeakSet();
 const __fbNativeHydrationSyncRootsV53 = new Set();
 let __fbNativeHydrationSyncPendingV53 = false;
+let __fbNativeHydrationSyncGenerationV53 = 0;
 
 const isFBNativeHydrationOnlyPost = (post, alreadyTracked = false) => {
     try {
@@ -3105,8 +3106,10 @@ function syncFBNativePostHydrationSlots(root = document) {
                 // Facebook's remove/reinsert recycle burst without expanding/collapsing twice.
                 if (!__fbNativeHydrationReleaseQueuedV53.has(post)) {
                     __fbNativeHydrationReleaseQueuedV53.add(post);
+                    const expectedGeneration = getFBSpaGeneration();
                     addTimeout(() => {
                         __fbNativeHydrationReleaseQueuedV53.delete(post);
+                        if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
                         if (post?.isConnected && isFBNativeHydrationOnlyPost(post, true)) {
                             retainFBNativeHydrationSlotV53(post);
                         } else {
@@ -3132,10 +3135,19 @@ const queueFBNativePostHydrationSyncV53 = (root) => {
             if (__fbNativeHydrationSyncRootsV53.size < 32) __fbNativeHydrationSyncRootsV53.add(post);
         });
 
-        if (__fbNativeHydrationSyncPendingV53 || __fbNativeHydrationSyncRootsV53.size === 0) return;
+        const expectedGeneration = getFBSpaGeneration();
+        if ((__fbNativeHydrationSyncPendingV53 && __fbNativeHydrationSyncGenerationV53 === expectedGeneration) || __fbNativeHydrationSyncRootsV53.size === 0) return;
         __fbNativeHydrationSyncPendingV53 = true;
+        __fbNativeHydrationSyncGenerationV53 = expectedGeneration;
         addTimeout(() => {
-            __fbNativeHydrationSyncPendingV53 = false;
+            if (__fbNativeHydrationSyncGenerationV53 === expectedGeneration) {
+                __fbNativeHydrationSyncPendingV53 = false;
+                __fbNativeHydrationSyncGenerationV53 = 0;
+            }
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) {
+                __fbNativeHydrationSyncRootsV53.clear();
+                return;
+            }
             const roots = Array.from(__fbNativeHydrationSyncRootsV53);
             __fbNativeHydrationSyncRootsV53.clear();
             roots.forEach(post => syncFBNativePostHydrationSlots(post));
@@ -3467,8 +3479,14 @@ const isolatedFbids = [
 	'577936375571001',
 	'577934212237884',
 	'7950002728364292',
+	'100000723216521',
+	'100002019726100',
+	'100000420676113',
+	'100001222610889',
+	'100001576806169',
 	'100002704826559',
 	'371861326178508',
+	'100000764364623',
 	'100006231940849',
 	'100013206342389',
 	'100079421143598',
@@ -3484,17 +3502,22 @@ const isolatedFbids = [
 	'779432839',
 	'1139183121',
 	'610250511',
+	'1612549900',
+	'1824830844',
 	'1495428881',
 	'1120952529',
 	'1356706889',
 	'10225004332552385',
+	'100000761260745',
 	'10219580837008386',
 	'10220029018452642',
+	'100000333296273',
 	'10223968662581283',
 	'10221462519169264',
 	'10224094556048541',
 	'1014542354035878',
 	'1014535897369857',
+	'100000142473398',
 	'1340482475983050',
 	'6872722896092286',
 	'100001785490722',
@@ -3505,10 +3528,13 @@ const isolatedFbids = [
 	'895814217116547',
 	'1062802150417752',
 	'1060897693941531',
+	'100001691946017',
 	'1364634045693372',
 	'1458027414228555',
 	'1240143084949993',
 	'100000586987296',
+	'100001691946017',
+	'100006990613731',
 	'292715294181170',
 	'505428986169752',
 	'100002030632206',
@@ -3531,7 +3557,11 @@ const isolatedFbids = [
 	'907980612566574',
 	'8065217176842846',
 	'895381147159854',
+	'100000837807327',
+	'100000658481983',
+	'100000767754620',
 	'1080918508606116',
+	'100002325955967',
 	'1072683142762986',
 	'630426793655292',
 	'609256709105634',
@@ -3651,6 +3681,122 @@ installFBEmbeddedChatAndIdentityCSSV56();
 
 let blockedFbids = [];
 
+// v59.2: resolved blocked vanity-profile aliases.
+// Facebook search results often expose only the public vanity URL (for example,
+// /piia.oksanen.75) and omit the numeric FBID. Once a vanity route has been
+// positively resolved to a blocked FBID on the actual profile surface, remember
+// that alias locally so search-result cards can be hidden without another lookup.
+const FB_BLOCKED_PROFILE_ALIAS_CACHE = {
+    storageKey: 'bravefox_fb_blocked_profile_aliases_v59',
+    maxKeys: 1500,
+    savePending: false,
+    loaded: false
+};
+const __fbBlockedProfileAliases = new Set();
+
+// v59.3: known vanity alias for a positively verified blocked FBID.
+// Facebook's people-search card can expose only this vanity URL and omit the numeric FBID.
+const FB_KNOWN_BLOCKED_PROFILE_ALIASES = new Set([
+    'user:piia.oksanen.75'
+]);
+
+const isFBBlockedProfileAliasKey = (key) => {
+    try {
+        const normalized = normalizeFBProfileKey(key);
+        return !!normalized &&
+            normalized.startsWith('user:') &&
+            __fbBlockedProfileAliases.has(normalized);
+    } catch (e) {
+        return false;
+    }
+};
+
+const isFBBlockedProfileAliasUrl = (inputUrl = '') => {
+    try {
+        const keys = getFBProfileKeysFromUrl(inputUrl);
+        for (const key of keys) {
+            if (isFBBlockedProfileAliasKey(key)) return true;
+        }
+    } catch (e) {}
+    return false;
+};
+
+const saveFBBlockedProfileAliasCache = () => {
+    try {
+        const aliases = Array.from(__fbBlockedProfileAliases)
+            .filter(key => String(key || '').startsWith('user:'))
+            .slice(0, FB_BLOCKED_PROFILE_ALIAS_CACHE.maxKeys);
+        const storage = getFBStorageArea('local');
+        storage?.set?.({
+            [FB_BLOCKED_PROFILE_ALIAS_CACHE.storageKey]: aliases
+        }, () => {
+            try { void chrome.runtime?.lastError; } catch (e) {}
+        });
+    } catch (e) {}
+};
+
+const loadFBBlockedProfileAliasCache = () => {
+    try {
+        const storage = getFBStorageArea('local');
+        if (!storage?.get) {
+            FB_BLOCKED_PROFILE_ALIAS_CACHE.loaded = true;
+            return;
+        }
+        storage.get([FB_BLOCKED_PROFILE_ALIAS_CACHE.storageKey], payload => {
+            try {
+                const aliases = Array.isArray(payload?.[FB_BLOCKED_PROFILE_ALIAS_CACHE.storageKey])
+                    ? payload[FB_BLOCKED_PROFILE_ALIAS_CACHE.storageKey]
+                    : [];
+                aliases.slice(0, FB_BLOCKED_PROFILE_ALIAS_CACHE.maxKeys).forEach(alias => {
+                    const normalized = normalizeFBProfileKey(alias);
+                    if (normalized && normalized.startsWith('user:')) {
+                        __fbBlockedProfileAliases.add(normalized);
+                    }
+                });
+            } finally {
+                FB_BLOCKED_PROFILE_ALIAS_CACHE.loaded = true;
+                addTimeout(() => {
+                    try {
+                        if (isFBSearchPagePath()) processSearchResults();
+                    } catch (e) {}
+                }, 0);
+            }
+        });
+    } catch (e) {
+        FB_BLOCKED_PROFILE_ALIAS_CACHE.loaded = true;
+    }
+};
+
+const mergeFBKnownBlockedProfileAliases = () => {
+    try {
+        FB_KNOWN_BLOCKED_PROFILE_ALIASES.forEach(alias => {
+            const normalized = normalizeFBProfileKey(alias);
+            if (normalized && normalized.startsWith('user:')) __fbBlockedProfileAliases.add(normalized);
+        });
+    } catch (e) {}
+};
+
+mergeFBKnownBlockedProfileAliases();
+
+loadFBBlockedProfileAliasCache();
+
+const rememberFBCurrentVanityProfileAsBlocked = (inputUrl = window.location.href) => {
+    try {
+        if (!isFBCurrentVanityProfileRoute(inputUrl)) return 0;
+        const keys = getFBProfileKeysFromUrl(inputUrl);
+        let changed = 0;
+        for (const key of keys) {
+            if (!key.startsWith('user:') || __fbBlockedProfileAliases.has(key)) continue;
+            __fbBlockedProfileAliases.add(key);
+            changed++;
+        }
+        if (changed) saveFBBlockedProfileAliasCache();
+        return changed;
+    } catch (e) {
+        return 0;
+    }
+}
+
 const blockedUrls = [
     /profile\.php\?id=100000639309471&sk=photos/,
     /profile\.php\?id=100000639309471&sk=photos_by/,
@@ -3724,7 +3870,12 @@ const blockedUrls = [
     /Rupaska%20/,
     /Laura%20Karhu/,
     /Mira%20Immonen/,
+    /Julia%20Rajala/,
+    /Nina%20Immonen/,
+    /Heli%20Kupari/,
     /Katariina%20/,
+    /Piia%20Oksanen/,
+    /Piia%20Bärlund/,
     /\/facebook\.com\/search\/top\/\?q=Katariina/,
     /\/facebook\.com\/search\/people\/\?q=Katariina/,
     /\/facebook\.com\/search\/top\/\?q=Kara%20B/,
@@ -3972,7 +4123,8 @@ const globalRegex = [
     	/AJ Lee's/i, /Nikkita Lyons/i, /Lisa Varon/i, /Marie Varon/i, /Irving/i, /Belts Mone/i, /Amanda Huber/i, /Megan Bayne/i, /Wren Sinclair/i, /Bella Twins/i, /Britt Baker/i,  /Kairii/i, /Sexxy/i, /Xia Li/i,
 	/Sexx/i, /Sexi/i, /Monroe/i, /Girlfriend/i, /Girl's/i, /Women's/i, /Woman's/i, /Lady's/i, /Ladies'/i, /Toni Harsunen/i, /Wikman/i, /Vikman/i, /Jaida Parker/i, /suositukset/i, /ehdotukset/i, /Kamitani/i, 
 	/Artificial Intelligence/i, /20\. heinäkuu klo/i, /Sisältö ei ole käytettävissä tällä hetkellä/i, /sinulle ehdotettu/i, /kendal.*(grey|gray)/i, /leila.*(grey|gray)/i, /Jessika WWE/i, /Fallon Henley/i,
-	/Kiana/i, /Kiana James/i, /QTCinderella/i, /KaliArmstrong/i, /Kali Armstrong/i, /#KaliArmstrong/i, /#Kali/i, /Gail Kim/i, /Eerika/i, /Mira Immo/i, /Serrano/i,
+	/Kiana/i, /Kiana James/i, /QTCinderella/i, /KaliArmstrong/i, /Kali Armstrong/i, /#KaliArmstrong/i, /#Kali/i, /Gail Kim/i, /Eerika/i, /Mira Immo/i, /Serrano/i, /Nina Immo/i, /Heli Kupa/i, /Julia Rajal/i,
+
 
 // Boundaried regexes (separated for clarity)
 	/\bVaughn\b/i, /\bEvelyn\b/i,
@@ -5453,6 +5605,9 @@ const checkVanityProfileFBID = () => {
         if (currentUrlIsApprovedForBrowsing(currentUrlFull)) return;
 
         if (fbScopedDocumentHasBlockedIdentity(vanityCheckCount >= 2)) {
+            // Positive numeric identity resolution on the actual profile route:
+            // remember its vanity alias so future search cards can be blocked cheaply.
+            rememberFBCurrentVanityProfileAsBlocked(currentUrlFull);
             triggerRedirect('blocked numeric FBID in scoped page identity');
             return;
         }
@@ -5831,6 +5986,56 @@ const currentProfileOrPageHasBlockedIdentityOrTerms = () => {
     return false;
 };
 
+// ===== v59: CANONICAL SPA ROUTE RUNTIME =====
+// Facebook is a long-lived document. Treat URL transitions as lifecycle boundaries so delayed
+// work from an older route cannot wake up against the new route's DOM.
+const FB_SPA_RUNTIME = {
+    currentUrl: '',
+    routeKey: '',
+    generation: 0,
+    initialized: false,
+    transitionPending: false
+};
+
+const getFBRouteKey = (inputUrl = window.location.href) => {
+    try {
+        const url = new URL(inputUrl, window.location.origin);
+        return `${url.pathname || '/'}${url.search || ''}${url.hash || ''}`;
+    } catch (e) {
+        return String(inputUrl || '');
+    }
+};
+
+const getFBProfileRouteKey = (inputUrl = window.location.href) => getFBRouteKey(inputUrl);
+
+const getFBSpaGeneration = () => FB_SPA_RUNTIME.generation;
+
+const isFBSpaGenerationCurrent = (generation) => {
+    try {
+        return generation === FB_SPA_RUNTIME.generation && !__fbCleanupRan;
+    } catch (e) {
+        return false;
+    }
+};
+
+const initializeFBSPARuntime = () => {
+    try {
+        FB_SPA_RUNTIME.currentUrl = window.location.href;
+        FB_SPA_RUNTIME.routeKey = getFBRouteKey(window.location.href);
+        FB_SPA_RUNTIME.generation = 1;
+        FB_SPA_RUNTIME.initialized = true;
+        FB_SPA_RUNTIME.transitionPending = false;
+    } catch (e) {
+        FB_SPA_RUNTIME.currentUrl = '';
+        FB_SPA_RUNTIME.routeKey = '';
+        FB_SPA_RUNTIME.generation = 1;
+        FB_SPA_RUNTIME.initialized = true;
+        FB_SPA_RUNTIME.transitionPending = false;
+    }
+};
+
+initializeFBSPARuntime();
+
 // ===== v52: non-allowlisted profile screening veil =====
 // Explicitly allowlisted/self/family profile routes remain immediate. Every other profile/page
 // route is covered with a lightweight white veil while the existing identity/URL/header filters
@@ -5841,16 +6046,8 @@ const FB_PROFILE_SCREENING = {
     startedAt: 0,
     cleanPasses: 0,
     timerPending: false,
+    timerGeneration: 0,
     deepScanDone: false
-};
-
-const getFBProfileRouteKey = (inputUrl = window.location.href) => {
-    try {
-        const url = new URL(inputUrl, window.location.origin);
-        return `${url.pathname || '/'}${url.search || ''}`;
-    } catch (e) {
-        return String(inputUrl || '');
-    }
 };
 
 const isExplicitlyAllowedProfileRoute = (inputUrl = window.location.href) => {
@@ -5940,13 +6137,139 @@ const isFBProfileIdentityHydrated = () => {
     }
 };
 
+// v59.1: vanity-route identity resolution. A SPA profile can become visually hydrated
+// before Facebook exposes the destination user's numeric FBID in the DOM. Do not treat a
+// generic h1/ProfileHeader as sufficient proof for a vanity route; wait for an identity
+// carrier that actually belongs to the current profile route. This specifically closes the
+// left-click SPA gap where refresh exposes the FBID but in-place navigation used to release
+// the profile veil too early.
+const isFBCurrentVanityProfileRoute = (inputUrl = window.location.href) => {
+    try {
+        const url = new URL(inputUrl, window.location.origin);
+        const path = String(url.pathname || '/').replace(/\/+$/, '').toLowerCase();
+        return path !== '/profile.php' && /^\/[a-z0-9_.-]+$/i.test(path);
+    } catch (e) {
+        return false;
+    }
+};
+
+const fbCurrentVanityProfileIdentityResolved = (inputUrl = window.location.href) => {
+    try {
+        if (!isFBCurrentVanityProfileRoute(inputUrl)) return true;
+        refreshAccountScopedFilters();
+        if (!blockedFbids.length) return true;
+
+        const url = new URL(inputUrl, window.location.origin);
+        const targetPath = String(url.pathname || '/').replace(/\/+$/, '').toLowerCase() || '/';
+        const inspected = new WeakSet();
+
+        const inspectNode = (node) => {
+            try {
+                if (!node || node.nodeType !== 1 || inspected.has(node)) return false;
+                inspected.add(node);
+
+                const exactAttrs = [
+                    'data-profileid', 'data-profile-id',
+                    'data-pageid', 'data-page-id',
+                    'data-ownerid', 'data-owner-id',
+                    'data-actorid', 'data-actor-id',
+                    'data-entityid', 'data-entity-id',
+                    'data-fbid'
+                ];
+                for (let i = 0; i < exactAttrs.length; i++) {
+                    const value = node.getAttribute?.(exactAttrs[i]) || '';
+                    if (value && blockedFbids.includes(String(value).trim())) return true;
+                }
+
+                const identityAttrs = [
+                    'href', 'data-hovercard', 'ajaxify', 'data-lynx-uri',
+                    'data-store', 'data-ft', 'data-testid', 'aria-describedby'
+                ];
+                for (let i = 0; i < identityAttrs.length; i++) {
+                    const value = node.getAttribute?.(identityAttrs[i]) || node[identityAttrs[i]] || '';
+                    if (fbExplicitIdentityValueHasBlockedFbid(value)) return true;
+                }
+
+                return false;
+            } catch (e) {
+                return false;
+            }
+        };
+
+        // Prefer actual self-profile links for the current vanity route. Their ancestor
+        // shells often receive the numeric identity attributes only after React hydration.
+        const selfLinks = document.querySelectorAll([
+            `a[href*="${targetPath}"]`,
+            '[data-pagelet="ProfileHeader"] a[href]',
+            '[data-pagelet="PageHeader"] a[href]'
+        ].join(','));
+
+        for (let i = 0; i < selfLinks.length && i < 120; i++) {
+            const link = selfLinks[i];
+            try {
+                const href = String(link.href || link.getAttribute?.('href') || '');
+                const parsed = new URL(href, window.location.origin);
+                const linkPath = String(parsed.pathname || '/').replace(/\/+$/, '').toLowerCase() || '/';
+                if (linkPath !== targetPath) continue;
+            } catch (e) {
+                continue;
+            }
+
+            if (inspectNode(link)) return true;
+
+            let shell = link.parentElement;
+            for (let depth = 0; shell && depth < 10; depth++, shell = shell.parentElement) {
+                if (inspectNode(shell)) return true;
+                if (shell.matches?.('[role="main"], main, [data-pagelet="ProfileHeader"], [data-pagelet="PageHeader"], [data-pagelet="ProfileActions"]')) break;
+            }
+        }
+
+        // Current-profile metadata can be updated independently of the visible header.
+        const metadata = document.querySelectorAll([
+            'link[rel="canonical"]',
+            'meta[property="og:url"]',
+            'meta[property="al:android:url"]',
+            'meta[property="al:ios:url"]',
+            'meta[content*="profile.php?id="]',
+            'meta[content*="page.php?id="]'
+        ].join(','));
+
+        for (let i = 0; i < metadata.length && i < 20; i++) {
+            if (inspectNode(metadata[i])) return true;
+        }
+
+        // Finally inspect the known profile identity surfaces themselves. This is intentionally
+        // bounded to profile/header containers instead of opening a document-wide FBID scan.
+        const identitySurfaces = document.querySelectorAll([
+            '[data-pagelet="ProfileHeader"]',
+            '[data-pagelet="PageHeader"]',
+            '[data-pagelet="ProfileActions"]'
+        ].join(','));
+        for (let i = 0; i < identitySurfaces.length && i < 8; i++) {
+            const surface = identitySurfaces[i];
+            if (inspectNode(surface)) return true;
+            const nodes = surface.querySelectorAll?.('[data-profileid], [data-profile-id], [data-pageid], [data-page-id], [data-fbid], [data-ownerid], [data-actorid], [data-entityid], [data-hovercard], [ajaxify], a[href]') || [];
+            for (let j = 0; j < nodes.length && j < 160; j++) {
+                if (inspectNode(nodes[j])) return true;
+            }
+        }
+
+        return false;
+    } catch (e) {
+        return false;
+    }
+};
+
 const scheduleFBProfileScreeningPass = (delay = 180) => {
     try {
-        if (FB_PROFILE_SCREENING.timerPending) return;
+        const expectedGeneration = getFBSpaGeneration();
+        if (FB_PROFILE_SCREENING.timerPending && FB_PROFILE_SCREENING.timerGeneration === expectedGeneration) return;
         FB_PROFILE_SCREENING.timerPending = true;
+        FB_PROFILE_SCREENING.timerGeneration = expectedGeneration;
         const expectedRoute = FB_PROFILE_SCREENING.routeKey;
         addTimeout(() => {
-            FB_PROFILE_SCREENING.timerPending = false;
+            if (FB_PROFILE_SCREENING.timerGeneration === expectedGeneration) FB_PROFILE_SCREENING.timerPending = false;
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             if (expectedRoute !== getFBProfileRouteKey()) {
                 updateFBProfileScreening(true);
                 return;
@@ -6000,11 +6323,28 @@ const evaluateFBProfileScreening = () => {
             currentProfileOrPageHasBlockedIdentityOrTerms();
 
         if (blocked) {
+            // Cache only when the profile screening itself has positively seen a blocked
+            // identity on the current vanity route. Broad text/URL matches do not create aliases.
+            try {
+                if (isFBCurrentVanityProfileRoute(currentUrl) && (
+                    fbValueHasBlockedFbid(currentUrl) ||
+                    fbScopedDocumentHasBlockedIdentity(deepIdentityBlocked)
+                )) {
+                    rememberFBCurrentVanityProfileAsBlocked(currentUrl);
+                }
+            } catch (e) {}
             triggerRedirect('blocked profile/page during v44 screened hydration');
             return true;
         }
 
-        if (isFBProfileIdentityHydrated()) {
+        const profileHydrated = isFBProfileIdentityHydrated();
+        const vanityIdentityResolved = fbCurrentVanityProfileIdentityResolved(currentUrl);
+
+        // A vanity route is not considered clean merely because an h1/header exists.
+        // Facebook can paint that shell first and attach the numeric FBID later. Keep the
+        // veil active until the current route exposes enough identity to make the numeric
+        // block decision, or until the existing 3s fail-open safety window is reached.
+        if (profileHydrated && vanityIdentityResolved) {
             FB_PROFILE_SCREENING.cleanPasses++;
         } else {
             FB_PROFILE_SCREENING.cleanPasses = 0;
@@ -6674,8 +7014,9 @@ const getFBPostHydrationSignature = (post) => {
     } catch (e) { return ''; }
 };
 
-const queueFBPostForSingleScan = (seed, delay = 90) => {
+const queueFBPostForSingleScan = (seed, delay = 90, expectedGeneration = getFBSpaGeneration()) => {
     try {
+        if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
         if (isFBMessengerPath(window.location.href) || isFBInsideEmbeddedChatSurfaceV56(seed) || isFBEmbeddedChatMutationNodeV56(seed)) {
             try { releaseFBEmbeddedChatPostScannerStateV56(seed?.ownerDocument || document); } catch (e) {}
             return;
@@ -6716,6 +7057,10 @@ const queueFBPostForSingleScan = (seed, delay = 90) => {
         addTimeout(() => {
             state.queued = false;
             state.queuedAt = 0;
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) {
+                __fbPostHydrationState.delete(post);
+                return;
+            }
             if (isFBMessengerPath(window.location.href) || isFBInsideEmbeddedChatSurfaceV56(post)) {
                 try {
                     if (isFBMessengerPath(window.location.href)) releaseFBMessengerPostScannerState(post.ownerDocument || document);
@@ -6746,7 +7091,7 @@ const queueFBPostForSingleScan = (seed, delay = 90) => {
             // skeleton) until it hands the FeedUnit over to real content. The bounded wait keeps
             // a stale loading marker from holding the scanner forever.
             if (hasFBNativePostSkeleton(post) && state.attempts < 18 && screenElapsed < 5000) {
-                queueFBPostForSingleScan(post, 140);
+                queueFBPostForSingleScan(post, 140, expectedGeneration);
                 return;
             }
 
@@ -6767,7 +7112,7 @@ const queueFBPostForSingleScan = (seed, delay = 90) => {
             // Two quiet turns normally land around 300–500 ms. The bounded fallback prevents a
             // permanently animated/video post from sitting at the loading anchor forever.
             if (state.stableTurns < 2 && state.attempts < 12 && screenElapsed < 5000) {
-                queueFBPostForSingleScan(post, 150);
+                queueFBPostForSingleScan(post, 150, expectedGeneration);
                 return;
             }
 
@@ -6788,7 +7133,7 @@ const queueFBPostForSingleScan = (seed, delay = 90) => {
                 state.attempts = 0;
                 state.stableTurns = 0;
                 state.lastSignature = '';
-                queueFBPostForSingleScan(post, 360);
+                queueFBPostForSingleScan(post, 360, expectedGeneration);
                 return;
             }
 
@@ -7315,17 +7660,36 @@ const processSearchResults = () => {
                     const chunks = [];
                     chunks.push(result.textContent || result.innerText || '');
                     pushAttrs(result, chunks);
+                    let resultHasBlockedProfileAlias = false;
                     if (result.querySelectorAll) {
-                        result.querySelectorAll('a[href], img[src], img[alt], [aria-label], [title], [data-hovercard], [data-profileid], [data-profile-id], [data-pageid], [data-page-id], [data-fbid], [data-userid], [data-ownerid], [data-store], [data-ft], [data-fbcleaner-urlsig]')
-                            .forEach(el => pushAttrs(el, chunks));
+                        const signalNodes = result.querySelectorAll('a[href], img[src], img[alt], [aria-label], [title], [data-hovercard], [data-profileid], [data-profile-id], [data-pageid], [data-page-id], [data-fbid], [data-userid], [data-ownerid], [data-store], [data-ft], [data-fbcleaner-urlsig]');
+                        for (let i = 0; i < signalNodes.length && i < 140; i++) {
+                            const el = signalNodes[i];
+                            pushAttrs(el, chunks);
+                            if (!resultHasBlockedProfileAlias) {
+                                try {
+                                    const href = el.matches?.('a[href]') ? (el.href || el.getAttribute('href') || '') : '';
+                                    if (href && isFBBlockedProfileAliasUrl(href)) resultHasBlockedProfileAlias = true;
+                                } catch (e) {}
+                            }
+                        }
                     }
 
                     const signalRaw = chunks.join(' ');
                     const signal = normalizeFBText(signalRaw);
-                    const hrefs = Array.from(result.querySelectorAll ? result.querySelectorAll('a[href]') : [])
-                        .map(a => a.href || a.getAttribute('href') || '')
-                        .join(' ');
-                    const processedKey = `${FB_SEARCH_FILTER_VERSION}|${fbDynamicWrestlerVersion}|${signal.length}|${hrefs.length}|${signal.slice(0, 900)}`;
+                    const anchorNodes = Array.from(result.querySelectorAll ? result.querySelectorAll('a[href]') : []);
+                    const hrefParts = [];
+                    for (let i = 0; i < anchorNodes.length && i < 40; i++) {
+                        const href = anchorNodes[i].href || anchorNodes[i].getAttribute('href') || '';
+                        if (href) hrefParts.push(href);
+                        if (!resultHasBlockedProfileAlias && href && isFBBlockedProfileAliasUrl(href)) {
+                            resultHasBlockedProfileAlias = true;
+                        }
+                    }
+                    const hrefs = hrefParts.join(' ');
+                    const decodedHrefs = safeDecodeFBValue(hrefs);
+                    const percentSpacedSignal = `${signal} ${decodedHrefs}`.replace(/\s+/g, '%20');
+                    const processedKey = `${FB_SEARCH_FILTER_VERSION}|${fbDynamicWrestlerVersion}|${__fbBlockedProfileAliases.size}|${signal.length}|${hrefs.length}|${signal.slice(0, 900)}`;
 
                     if (result.classList.contains('fb-search-processed') && result.getAttribute('data-processed-key-v32') === processedKey) return;
 
@@ -7340,8 +7704,10 @@ const processSearchResults = () => {
                     // Important: active regexes, including dynamic wrestler names, must override search-result
                     // safe-word shields. Otherwise descriptions containing banned names can slip through.
                     if (matchesAnyActiveRegex(signal)) isBlocked = true;
+                    if (!isBlocked && resultHasBlockedProfileAlias) isBlocked = true;
                     if (!isBlocked && matchesAnyBlockedFbid(`${signal} ${hrefs}`)) isBlocked = true;
                     if (!isBlocked && matchesAnyBlockedUrl(`${signal} ${hrefs}`)) isBlocked = true;
+                    if (!isBlocked && matchesAnyBlockedUrl(percentSpacedSignal)) isBlocked = true;
                     if (!isBlocked && matchesBlockedUrlCandidates(`${hrefs} ${signal}`)) isBlocked = true;
 
                     if (isBlocked) {
@@ -8629,22 +8995,47 @@ const interceptNavigation = () => {
             if (!isPlainLeftClick(event)) return;
 
             if (fbClickedTargetHasBlockedIdentity(anchor) || matchesDirectFacebookBlockedUrlForRedirect(href) || clickedProfileOrPageHasBlockedTerm(anchor)) {
+                try {
+                    if (isLikelyProfileOrPageRoute(href)) rememberFBCurrentVanityProfileAsBlocked(href);
+                } catch (e) {}
                 event.preventDefault();
                 event.stopPropagation();
                 triggerRedirect('blocked clicked navigation');
                 return;
             }
 
-            // Bare profile/page SPA routes may hide FBIDs until after hydration.
-            // Force a normal document navigation so handleRedirects can inspect metadata.
+            // Bare profile/page routes can be vanity URLs. Facebook's SPA router may keep the
+            // destination's numeric FBID entirely inside internal hydration state, which means the
+            // existing document-scoped FBID scanner cannot reliably resolve a newly clicked vanity
+            // profile. For an unknown Facebook profile/page, prefer a real document navigation so
+            // document-start/server bootstrap identity data gets a chance to expose the numeric FBID.
             if (isLikelyProfileOrPageRoute(href)) {
                 const textSignal = normalizeFBText([href, anchor.textContent || '', anchor.getAttribute('aria-label') || '', anchor.getAttribute('title') || ''].join(' '));
                 if (matchesAnyActiveRegex(textSignal)) {
                     event.preventDefault();
                     event.stopPropagation();
+                    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
                     triggerRedirect('blocked clicked profile/page term');
                     return;
                 }
+
+                try {
+                    const hrefUrl = new URL(href, window.location.origin);
+                    const isFacebookTarget = /(^|\.)facebook\.com$/i.test(hrefUrl.hostname);
+                    const isSafeDestination = isExplicitlyAllowedProfileRoute(hrefUrl.href);
+
+                    // Known-safe/trusted profiles remain fully SPA-native. Unknown vanity profile/page
+                    // routes take the hard-navigation fallback so numeric FBID screening can inspect
+                    // Facebook's fresh destination bootstrap just like a refresh or middle-click.
+                    if (isFacebookTarget && !isSafeDestination) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+                        devLog('Hard-navigating unknown Facebook profile/page for numeric identity screening: ' + hrefUrl.href);
+                        window.location.assign(hrefUrl.href);
+                        return;
+                    }
+                } catch (e) {}
             }
         };
 
@@ -8681,6 +9072,7 @@ const interceptNavigation = () => {
 const FB_USER_INTERACTION_QUIET_MS_V53 = 320;
 let __fbLastUserInteractionAtV53 = 0;
 let __fbInteractionSettlePendingV53 = false;
+let __fbInteractionSettleGenerationV53 = 0;
 let __fbInteractionQuietLaneInstalledV53 = false;
 
 const isFBUserInteractionHotV53 = () => {
@@ -8693,10 +9085,14 @@ const isFBUserInteractionHotV53 = () => {
 
 const scheduleFBInteractionSettledPassV53 = () => {
     try {
-        if (__fbInteractionSettlePendingV53) return;
+        const expectedGeneration = getFBSpaGeneration();
+        if (__fbInteractionSettlePendingV53 && __fbInteractionSettleGenerationV53 === expectedGeneration) return;
         __fbInteractionSettlePendingV53 = true;
+        __fbInteractionSettleGenerationV53 = expectedGeneration;
 
         const finishWhenQuiet = () => {
+            if (__fbInteractionSettleGenerationV53 === expectedGeneration) __fbInteractionSettlePendingV53 = false;
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             const remaining = FB_USER_INTERACTION_QUIET_MS_V53 - (Date.now() - __fbLastUserInteractionAtV53);
             if (remaining > 0) {
                 addTimeout(finishWhenQuiet, remaining + 24);
@@ -8707,12 +9103,13 @@ const scheduleFBInteractionSettledPassV53 = () => {
             if (document.hidden || __fbCleanupRan) return;
             if (runFBMessengerNativeMaintenance()) return;
             try { syncFBNativePostHydrationSlots(document); } catch (e) {}
-            scheduleRunAllFilters();
+            scheduleRunAllFilters(expectedGeneration);
         };
 
         addTimeout(finishWhenQuiet, FB_USER_INTERACTION_QUIET_MS_V53 + 24);
     } catch (e) {
         __fbInteractionSettlePendingV53 = false;
+        __fbInteractionSettleGenerationV53 = 0;
     }
 };
 
@@ -8742,16 +9139,22 @@ const installFBUserInteractionQuietLaneV53 = () => {
     } catch (e) {}
 };
 
-// v39/v53: coalesced full-filter scheduler.
+// v39/v53/v59: coalesced generation-aware full-filter scheduler.
 // Several FB lifecycle events can fire back-to-back for the same visual update. Queueing one
 // run on the next timer tick keeps behavior identical while avoiding duplicate full-page sweeps.
 let __fbRunAllFiltersQueued = false;
-const scheduleRunAllFilters = () => {
+let __fbRunAllFiltersQueuedGeneration = 0;
+const scheduleRunAllFilters = (expectedGeneration = getFBSpaGeneration()) => {
     try {
-        if (__fbRunAllFiltersQueued) return;
+        if (__fbRunAllFiltersQueued && __fbRunAllFiltersQueuedGeneration === expectedGeneration) return;
         __fbRunAllFiltersQueued = true;
+        __fbRunAllFiltersQueuedGeneration = expectedGeneration;
         addTimeout(() => {
-            __fbRunAllFiltersQueued = false;
+            if (__fbRunAllFiltersQueuedGeneration === expectedGeneration) {
+                __fbRunAllFiltersQueued = false;
+                __fbRunAllFiltersQueuedGeneration = 0;
+            }
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             try {
                 if (runFBMessengerNativeMaintenance()) return;
                 if (isFBUserInteractionHotV53()) {
@@ -8763,7 +9166,75 @@ const scheduleRunAllFilters = () => {
             } catch (e) {}
         }, 0);
     } catch (e) {
-        try { runAllFilters(); } catch (ignored) {}
+        try {
+            if (isFBSpaGenerationCurrent(expectedGeneration)) runAllFilters();
+        } catch (ignored) {}
+    }
+};
+
+const handleFBSPARouteTransition = (reason = '') => {
+    try {
+        const currentUrl = window.location.href;
+        const nextRouteKey = getFBRouteKey(currentUrl);
+        const routeChanged = !FB_SPA_RUNTIME.initialized ||
+            nextRouteKey !== FB_SPA_RUNTIME.routeKey ||
+            currentUrl !== FB_SPA_RUNTIME.currentUrl;
+
+        if (!routeChanged) return false;
+
+        const previousRouteKey = FB_SPA_RUNTIME.routeKey;
+        FB_SPA_RUNTIME.currentUrl = currentUrl;
+        FB_SPA_RUNTIME.routeKey = nextRouteKey;
+        FB_SPA_RUNTIME.generation++;
+        FB_SPA_RUNTIME.transitionPending = true;
+        FB_SPA_RUNTIME.initialized = true;
+
+        // Reset route-bound state first. Delayed callbacks from the previous route are invalidated
+        // by the generation bump, while the current surface gets a clean lifecycle below.
+        try {
+            FB_PROFILE_SCREENING.routeKey = '';
+            FB_PROFILE_SCREENING.completedRouteKey = '';
+            FB_PROFILE_SCREENING.startedAt = 0;
+            FB_PROFILE_SCREENING.cleanPasses = 0;
+            FB_PROFILE_SCREENING.timerPending = false;
+            FB_PROFILE_SCREENING.deepScanDone = false;
+            releaseFBProfileScreeningOverlay();
+        } catch (e) {}
+        try {
+            // Pending async jobs are intentionally not force-cleared here. Their generation stamp
+            // makes them harmless on wake-up, while the current generation can queue fresh work.
+        } catch (e) {}
+        try {
+            __fbPerf.routeKey = nextRouteKey;
+            __fbPerf.lastPrehideRouteKey = '';
+        } catch (e) {}
+        try {
+            updateFBSearchPageClass();
+            updateFBCommentImmunityClasses();
+            updateFBCommentOverlayClass();
+            updateFBHomeFeedGateClass();
+            refreshFBElementHidingAccountScope();
+        } catch (e) {}
+
+        // Route-specific native/prehide setup happens before React/FB hydration gets another chance
+        // to paint the destination. The authoritative scheduler below still owns the normal pass.
+        if (isFBMessengerPath(currentUrl)) {
+            try { runFBMessengerNativeMaintenance(true); } catch (e) {}
+        } else {
+            try { protectFBReelsCurrentLocation(); } catch (e) {}
+            try { injectSpecificUrlPrehideCSS(); } catch (e) {}
+            try { scrubSpecificUrlNonFeedModules(document); } catch (e) {}
+        }
+
+        try { refreshFBSpecificSurfaceHydrationObserverV58(); } catch (e) {}
+        try { updateFBProfileScreening(true); } catch (e) {}
+        try { scheduleRunAllFilters(FB_SPA_RUNTIME.generation); } catch (e) {}
+        FB_SPA_RUNTIME.transitionPending = false;
+        devLog(`SPA route transition: ${previousRouteKey || '(initial)'} -> ${nextRouteKey}${reason ? ' [' + reason + ']' : ''}`);
+        return true;
+    } catch (e) {
+        FB_SPA_RUNTIME.transitionPending = false;
+        return false;
     }
 };
 
@@ -8775,52 +9246,23 @@ const hookHistoryAPI = () => {
 
         const originalPushState = history.pushState;
         history.pushState = function() {
-            const previousProfileRoute = getFBProfileRouteKey();
             const rv = originalPushState.apply(this, arguments);
-            try {
-                if (previousProfileRoute !== getFBProfileRouteKey()) updateFBProfileScreening(true);
-            } catch (e) {}
-            try { refreshFBSpecificSurfaceHydrationObserverV58(); } catch (e) {}
-            if (isFBMessengerPath(window.location.href)) {
-                try { runFBMessengerNativeMaintenance(true); } catch (e) {}
-            } else {
-                try { protectFBReelsCurrentLocation(); } catch (e) {}
-                try { injectSpecificUrlPrehideCSS(); } catch (e) {}
-                try { scrubSpecificUrlNonFeedModules(document); } catch (e) {}
-            }
-            scheduleRunAllFilters();
+            try { handleFBSPARouteTransition('pushState'); } catch (e) {}
             return rv;
         };
 
         const originalReplaceState = history.replaceState;
         history.replaceState = function() {
-            const previousProfileRoute = getFBProfileRouteKey();
             const rv = originalReplaceState.apply(this, arguments);
-            try {
-                if (previousProfileRoute !== getFBProfileRouteKey()) updateFBProfileScreening(true);
-            } catch (e) {}
-            try { refreshFBSpecificSurfaceHydrationObserverV58(); } catch (e) {}
-            if (isFBMessengerPath(window.location.href)) {
-                try { runFBMessengerNativeMaintenance(true); } catch (e) {}
-            } else {
-                try { protectFBReelsCurrentLocation(); } catch (e) {}
-                try { injectSpecificUrlPrehideCSS(); } catch (e) {}
-                try { scrubSpecificUrlNonFeedModules(document); } catch (e) {}
-            }
-            scheduleRunAllFilters();
+            try { handleFBSPARouteTransition('replaceState'); } catch (e) {}
             return rv;
         };
 
         onWindowEvent(window, 'popstate', () => {
-            try { updateFBProfileScreening(true); } catch (e) {}
-            try { refreshFBSpecificSurfaceHydrationObserverV58(); } catch (e) {}
-            if (isFBMessengerPath(window.location.href)) {
-                try { runFBMessengerNativeMaintenance(true); } catch (e) {}
-            } else {
-                try { protectFBReelsCurrentLocation(); } catch (e) {}
-                try { injectSpecificUrlPrehideCSS(); } catch (e) {}
-            }
-            scheduleRunAllFilters();
+            try { handleFBSPARouteTransition('popstate'); } catch (e) {}
+        }, false);
+        onWindowEvent(window, 'hashchange', () => {
+            try { handleFBSPARouteTransition('hashchange'); } catch (e) {}
         }, false);
     } catch (e) {}
 };
@@ -8868,12 +9310,19 @@ let __fbDomObserverInstalled = false;
 // of tiny mutations for one visual update; running the same maintenance stack for every micro-mutation
 // is wasted work and causes stutter.
 let __fbHydrationRetryPending = false;
+let __fbHydrationRetryGeneration = 0;
 const scheduleFBPostHydrationRetry = () => {
     try {
-        if (__fbHydrationRetryPending) return;
+        const expectedGeneration = getFBSpaGeneration();
+        if (__fbHydrationRetryPending && __fbHydrationRetryGeneration === expectedGeneration) return;
         __fbHydrationRetryPending = true;
+        __fbHydrationRetryGeneration = expectedGeneration;
         addTimeout(() => {
-            __fbHydrationRetryPending = false;
+            if (__fbHydrationRetryGeneration === expectedGeneration) {
+                __fbHydrationRetryPending = false;
+                __fbHydrationRetryGeneration = 0;
+            }
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             try {
                 if (runFBMessengerNativeMaintenance()) return;
                 if (isFBUserInteractionHotV53()) {
@@ -8945,8 +9394,10 @@ const scheduleFBSpecificApprovedPostRecheckV58 = (post) => {
     try {
         if (!post?.isConnected || __fbSpecificApprovedRecheckPendingV58.has(post)) return;
         __fbSpecificApprovedRecheckPendingV58.add(post);
+        const expectedGeneration = getFBSpaGeneration();
         addTimeout(() => {
             __fbSpecificApprovedRecheckPendingV58.delete(post);
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             try {
                 if (!isFBSpecificSafetySurfaceV58() || document.hidden || !post.isConnected) return;
                 if (isFBMessengerPath(window.location.href) || isFBTrustedProfileTimelineSurface()) return;
@@ -9127,6 +9578,10 @@ const observeDOMChanges = () => {
         };
 
         const observer = trackObserver(new MutationObserver((mutations) => {
+            // v59: route transitions are first-class. A missed History API call is still recoverable
+            // when Facebook swaps the document shell and starts emitting the next mutation batch.
+            if (handleFBSPARouteTransition('mutation')) return;
+
             // v57: the document-start micro-observer owns exact identity/chat-shell work.
             // Do not duplicate those scans in the already-busy main Facebook observer.
             if (mutationBatchOnlyIgnoredNodes(mutations)) return;
@@ -10728,11 +11183,6 @@ const __fbPerf = {
     lastPrehideRouteKey: ''
 };
 
-const getFBRouteKey = () => {
-    try { return `${location.pathname || '/'}${location.search || ''}`; }
-    catch (e) { return ''; }
-};
-
 const shouldRunCadenced = (key, ms, force = false) => {
     try {
         const now = (performance && performance.now) ? performance.now() : Date.now();
@@ -10905,13 +11355,20 @@ const runFBRamSaver = (force = false) => {
 // gating and the visible-feed fast lane still make the immediate safety decision; this pass is
 // the slower compatibility/audit layer and no longer sits between input and the next paint.
 let __fbHeavyFilterPassPendingV53 = false;
+let __fbHeavyFilterPassGenerationV53 = 0;
 const scheduleFBHeavyFilterPassV53 = () => {
     try {
         if (runFBMessengerNativeMaintenance()) return;
-        if (__fbHeavyFilterPassPendingV53 || __fbCleanupRan) return;
+        const expectedGeneration = getFBSpaGeneration();
+        if ((__fbHeavyFilterPassPendingV53 && __fbHeavyFilterPassGenerationV53 === expectedGeneration) || __fbCleanupRan) return;
         __fbHeavyFilterPassPendingV53 = true;
+        __fbHeavyFilterPassGenerationV53 = expectedGeneration;
         addIdleCallback(() => {
-            __fbHeavyFilterPassPendingV53 = false;
+            if (__fbHeavyFilterPassGenerationV53 === expectedGeneration) {
+                __fbHeavyFilterPassPendingV53 = false;
+                __fbHeavyFilterPassGenerationV53 = 0;
+            }
+            if (!isFBSpaGenerationCurrent(expectedGeneration)) return;
             if (__fbCleanupRan) return;
             if (runFBMessengerNativeMaintenance()) return;
             if (isFBUserInteractionHotV53()) {
@@ -10998,7 +11455,7 @@ const ensureDOMReady = () => {
     }
 };
 
-// [SPA-RUNTIME] v50 canonical one-pass initialization.
+// [SPA-RUNTIME] v59.2 canonical route-aware initialization.
 const initializeFacebookCleaner = () => {
     devLog('Initializing BraveFox Facebook policy engine v58');
     refreshFBSpecificSurfaceHydrationObserverV58();
@@ -11059,14 +11516,14 @@ const initializeFacebookCleaner = () => {
 initializeFacebookCleaner();
 
 // Attach event listeners for changes (tracked for cleanup)
-onWindowEvent(window, 'DOMContentLoaded', scheduleRunAllFilters, false);
-onWindowEvent(window, 'load', scheduleRunAllFilters, false);
-onWindowEvent(window, 'popstate', scheduleRunAllFilters, false);
+onWindowEvent(window, 'DOMContentLoaded', () => scheduleRunAllFilters(), false);
+onWindowEvent(window, 'load', () => scheduleRunAllFilters(), false);
 
 // Main interval scheduler
 function scheduleMainInterval() {
     addInterval(() => {
         if (!document.hidden) {
+            if (handleFBSPARouteTransition('interval')) return;
             if (runFBMessengerNativeMaintenance()) {
                 // Full-page Messenger: native UI plus narrow hidden-inbox-row cleanup only.
             } else if (runFBStoriesNativeMaintenance()) {
