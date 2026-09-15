@@ -932,11 +932,11 @@ const blockedSites = [
 
 // Blocked TLDs for auto-closure
 const blockedTLDs = [
-    '.ai', '.art', '.makeup', '.off', '.club', '.id', '.it', '.best', '.cc', '.cn', '.click', '.exposed',
+    '.ai', '.art', '.makeup', '.off', '.club', '.id', '.best', '.cc', '.cn', '.click', '.exposed', '.fun',
     '.you','.top', '.me', '.us', '.vip', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', '.asia', '.ee',
     '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.fr', 
     '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.in', '.gf', '.fox', '.moe', '.cat', '.nude',
-    '.life', '.now', '.today', '.world', '.zone', '.bot', '.red', '.fun', 
+    '.life', '.now', '.today', '.world', '.zone', '.bot', '.red', 
 ];
 
 // Memory-optimized cache with size limit and TTL

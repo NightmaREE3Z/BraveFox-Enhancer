@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         FBCleaner 27.5.2
-// @date      	 2026-09-05
+// @name         FBCleaner 27.6.5
+// @date      	 2026-09-15
 // @description  Makes my Facebook experience less terrible.
 // @match        *://*.facebook.com/*
 // @grant        none
@@ -62,12 +62,15 @@ const getCachedLoggedInFacebookAccountFbid = (htmlLimit = 180000) => {
 
     const now = Date.now();
     if (now < __fbNextAccountHtmlProbeAt) return '';
-    __fbNextAccountHtmlProbeAt = now + 8000;
 
     try {
         const html = document.documentElement
             ? String(document.documentElement.innerHTML || '').slice(0, htmlLimit)
             : '';
+        // v61: document-start can run before Facebook has emitted ACCOUNT_ID/USER_ID.
+        // Do not turn that empty early probe into an 8-second blind spot; retry quickly
+        // until there is enough hydrated markup to justify the normal cooldown.
+        __fbNextAccountHtmlProbeAt = now + (html.length < 12000 ? 180 : 8000);
         const patterns = [
             /["']ACCOUNT_ID["']\s*[:=]\s*["'](\d+)["']/i,
             /["']USER_ID["']\s*[:=]\s*["'](\d+)["']/i,
@@ -82,7 +85,9 @@ const getCachedLoggedInFacebookAccountFbid = (htmlLimit = 180000) => {
                 return match[1];
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        __fbNextAccountHtmlProbeAt = now + 350;
+    }
     return '';
 };
 
@@ -1369,14 +1374,25 @@ const learnFBTrustedProfilesFromFriendsSurface = (root = document) => {
     try {
         if (!isSupportedFriendListOwner()) return 0;
         const scanRoot = root?.querySelectorAll ? root : document;
-        const main = scanRoot.nodeType === 1 && scanRoot.matches?.('[role="main"], main')
-            ? scanRoot
-            : scanRoot.querySelector?.('[role="main"], main') || document.querySelector('[role="main"], main');
-        if (!main) return 0;
+        let scanBase = null;
 
-        const links = main.querySelectorAll?.('a[href]') || [];
+        if (scanRoot === document) {
+            scanBase = document.querySelector('[role="main"], main');
+        } else if (scanRoot.nodeType === 1) {
+            if (scanRoot.matches?.('[role="main"], main')) scanBase = scanRoot;
+            else if (scanRoot.closest?.('[role="main"], main')) scanBase = scanRoot;
+            else scanBase = scanRoot.querySelector?.('[role="main"], main') || null;
+        }
+        if (!scanBase) return 0;
+
+        const links = [];
+        if (scanBase.nodeType === 1 && scanBase.matches?.('a[href]')) links.push(scanBase);
+        const descendants = scanBase.querySelectorAll?.('a[href]') || [];
+        const maxLinks = scanRoot === document ? 1800 : 220;
+        for (let i = 0; i < descendants.length && links.length < maxLinks; i++) links.push(descendants[i]);
+
         const cards = new Set();
-        for (let i = 0; i < links.length && i < 1800; i++) {
+        for (let i = 0; i < links.length && i < maxLinks; i++) {
             const card = findFBFriendCardForTrust(links[i]);
             if (card) cards.add(card);
         }
@@ -1499,11 +1515,17 @@ const injectFBSafeNoGlimpseBootstrap = () => {
             }
 
             /* Friends/profile cards: friends page only.
-               v22: include the current card shell captured from friends lists:
-               div.x78zum5.xdt5ytf.x12upk82 -> profile photo link + name link + mutual friends text.
-               These stay invisible until the scanner marks them approved/banned, preventing blocked-card glimpse. */
-            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has(a[role="link"][href*="facebook.com"]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
-            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has(a[data-fbcleaner-urlsig*="facebook.com"]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned) {
+               v60: prehide the current card shell as soon as ANY profile-identity carrier exists.
+               The final scanner still owns approve/ban decisions; this only closes the paint gap before
+               absolute facebook.com URLs/url signatures finish hydrating. */
+            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has(a[role="link"][href]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has([data-fbid], [data-profileid], [data-profile-id], [data-userid], [data-ownerid]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has([aria-label*="Lisää vaihtoehtoja kaverille" i], [aria-label*="More options for friend" i]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82:has(a[data-fbcleaner-urlsig*="facebook.com"]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x12upk82.xod5an3:has(a[role="link"][href]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x12upk82.xod5an3:has([data-fbid], [data-profileid], [data-profile-id], [data-userid], [data-ownerid]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x12upk82.xod5an3:has([aria-label*="Lisää vaihtoehtoja kaverille" i], [aria-label*="More options for friend" i]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned),
+            html.fb-friends-card-softgate-v2 div.x12upk82.xod5an3:has(a[data-fbcleaner-urlsig*="facebook.com"]):not(.fb-profile-card-approved):not(.fb-profile-card-banned):not(.fb-element-banned) {
                 visibility: hidden !important;
                 opacity: 0 !important;
                 pointer-events: none !important;
@@ -1511,7 +1533,8 @@ const injectFBSafeNoGlimpseBootstrap = () => {
                 animation: none !important;
             }
 
-            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82.fb-profile-card-approved {
+            html.fb-friends-card-softgate-v2 div.x78zum5.xdt5ytf.x12upk82.fb-profile-card-approved,
+            html.fb-friends-card-softgate-v2 div.x12upk82.xod5an3.fb-profile-card-approved {
                 visibility: visible !important;
                 opacity: 1 !important;
                 pointer-events: auto !important;
@@ -1547,6 +1570,15 @@ const releaseFBFriendsSoftGateV2Soon = () => {
 updateFBFriendsSoftGate();
 injectFBSafeNoGlimpseBootstrap();
 releaseFBFriendsSoftGateV2Soon();
+[80, 220, 520, 1100].forEach(delay => addTimeout(() => {
+    try {
+        if (!isFBFriendsSurfacePath()) return;
+        refreshAccountScopedFilters();
+        updateFBFriendsSoftGate();
+        refreshFBFriendsIdentityAttributeObserverV61();
+        if (__fbStrictAccountEnabled) scrubBlockedFriendAndContactCards(document);
+    } catch (e) {}
+}, delay));
 
 // v43: one authoritative classifier for reaction/likes dialogs.
 // Notifications and comments can also contain profile links and the word "like";
@@ -2605,6 +2637,29 @@ const buildFBElementDecisionSignature = (element, cacheType = 'generic') => {
         const rawText = String(element.textContent || '');
         const sampledText = fbNotifNorm(sampleFBTextForSignature(rawText));
         const attrSignals = [];
+        if (element.getAttribute) {
+            attrSignals.push([
+                element.tagName || '',
+                element.href || '',
+                element.src || '',
+                element.getAttribute('href') || '',
+                element.getAttribute('src') || '',
+                element.getAttribute('alt') || '',
+                element.getAttribute('aria-label') || '',
+                element.getAttribute('title') || '',
+                element.getAttribute('data-fbid') || '',
+                element.getAttribute('data-profileid') || '',
+                element.getAttribute('data-profile-id') || '',
+                element.getAttribute('data-pageid') || '',
+                element.getAttribute('data-page-id') || '',
+                element.getAttribute('data-userid') || '',
+                element.getAttribute('data-ownerid') || '',
+                element.getAttribute('data-hovercard') || '',
+                element.getAttribute('data-store') || '',
+                element.getAttribute('data-ft') || '',
+                element.getAttribute('data-fbcleaner-urlsig') || ''
+            ].join('~'));
+        }
         const selectors = [
             'a[href]',
             'img[alt]',
@@ -3529,6 +3584,7 @@ const isolatedFbids = [
 	'1062802150417752',
 	'1060897693941531',
 	'100001691946017',
+	'100008096086911',
 	'1364634045693372',
 	'1458027414228555',
 	'1240143084949993',
@@ -4096,7 +4152,7 @@ const safeSelectors = [
 // Keyword arrays
 const isolatedRegex = [
 //Only available for supported accounts
-	/gareta/i, /\bkati\b/i, /juutilainen/i, /harjula/i, /taisto/i, /riituska/i, /rupaska/i,
+	/gareta/i, /\bkati\b/i, /juutilainen/i, /harjula/i, /taisto/i, /riituska/i, /rupaska/i, /hvanain/i, /eidih/i,
 ];
 
 const globalRegex = [
@@ -9214,6 +9270,8 @@ const handleFBSPARouteTransition = (reason = '') => {
             updateFBCommentOverlayClass();
             updateFBHomeFeedGateClass();
             refreshFBElementHidingAccountScope();
+            updateFBFriendsSoftGate();
+            refreshFBFriendsIdentityAttributeObserverV61();
         } catch (e) {}
 
         // Route-specific native/prehide setup happens before React/FB hydration gets another chance
@@ -9617,7 +9675,6 @@ const observeDOMChanges = () => {
 
             if (!interactionHot) {
                 runFBObserverMaintenance();
-                if (isFBFriendsSurfacePath()) learnFBTrustedProfilesFromFriendsSurface(document);
                 if (isFBTrustedProfileTimelineSurface()) releaseFBTrustedTimelinePosts(document);
                 if (updateFBCommentOverlayClass()) {
                     hideCriticalNavOnly();
@@ -9633,6 +9690,7 @@ const observeDOMChanges = () => {
             // Classic loops let us stop scanning the mutation batch once both flags are known.
             let hasSearchChanges = false;
             let hasHomeFeedUnitChanges = false;
+            const friendMutationRoots = (__fbStrictAccountEnabled && isFBFriendsSurfacePath()) ? new Set() : null;
 
             for (let m = 0; m < mutations.length; m++) {
                 const mutation = mutations[m];
@@ -9653,6 +9711,11 @@ const observeDOMChanges = () => {
                     for (let n = 0; n < addedNodes.length; n++) {
                         const node = addedNodes[n];
                         if (!node || node.nodeType !== 1) continue;
+
+                        if (friendMutationRoots && friendMutationRoots.size < 24) {
+                            const friendRoot = getFBFriendCardMutationRootV61(node);
+                            if (friendRoot) friendMutationRoots.add(friendRoot);
+                        }
 
                         if (isFBInsideEmbeddedChatSurfaceV56(node) || isFBEmbeddedChatMutationNodeV56(node)) {
                             // Native chat mutations are simply ignored here. The small observer
@@ -9687,6 +9750,13 @@ const observeDOMChanges = () => {
                 }
 
                 if (hasSearchChanges && hasHomeFeedUnitChanges) break;
+            }
+
+            if (friendMutationRoots?.size) {
+                updateFBFriendsSoftGate();
+                friendMutationRoots.forEach(root => {
+                    try { scrubBlockedFriendAndContactCards(root); } catch (e) {}
+                });
             }
 
             // Process search results immediately if detected.
@@ -9730,16 +9800,30 @@ const observeDOMChanges = () => {
     }
 };
 // Targeted friends/contact card cleanup. This does NOT approve/hide feed posts.
-const scrubBlockedFriendAndContactCards = () => {
+const scrubBlockedFriendAndContactCards = (root = document) => {
     try {
         refreshAccountScopedFilters();
-        learnFBTrustedProfilesFromFriendsSurface(document);
+        const scanRoot = root?.querySelectorAll ? root : document;
+        learnFBTrustedProfilesFromFriendsSurface(scanRoot);
         if (!__fbStrictAccountEnabled) return;
 
+        const queryIncludingRoot = (selector) => {
+            const matches = [];
+            try {
+                if (scanRoot.nodeType === 1 && scanRoot.matches?.(selector)) matches.push(scanRoot);
+                scanRoot.querySelectorAll?.(selector).forEach(node => matches.push(node));
+            } catch (e) {}
+            return matches;
+        };
+
         const optionSelector = '[aria-label*="Lisää vaihtoehtoja kaverille"], [aria-label*="More options for friend"], [aria-label*="More options for"]';
-        // v22: Current friends-list cards may be x78zum5/xdt5ytf/x12upk82 without xod5an3.
-        // Keep this selector tight to profile-link cards; safety checks below prevent profile-header/main wrappers from being used as cards.
-        const modernProfileCardSelector = 'div.x78zum5.xdt5ytf.x12upk82:has(a[role="link"][href*="facebook.com"], a[data-fbcleaner-urlsig*="facebook.com"])';
+        // v60: Current friends-list cards may expose only relative profile URLs or data-* identity
+        // carriers during their first React paint. Match the same early carriers as the CSS softgate;
+        // safety checks below still prevent profile-header/main wrappers from being used as cards.
+        const modernProfileCardSelector = [
+            'div.x78zum5.xdt5ytf.x12upk82',
+            'div.x12upk82.xod5an3'
+        ].map(shell => `${shell}:has(a[role="link"][href], [data-fbid], [data-profileid], [data-profile-id], [data-userid], [data-ownerid], [aria-label*="Lisää vaihtoehtoja kaverille" i], [aria-label*="More options for friend" i], a[data-fbcleaner-urlsig*="facebook.com"])`).join(',');
 
         const collectSignals = (element) => {
             const chunks = [];
@@ -9898,10 +9982,10 @@ const scrubBlockedFriendAndContactCards = () => {
             } catch (e) {}
         };
 
-        document.querySelectorAll('.fb-profile-card-processed, .fb-profile-card-approved, .fb-profile-card-banned').forEach(refreshRecycledProfileCard);
+        queryIncludingRoot('.fb-profile-card-processed, .fb-profile-card-approved, .fb-profile-card-banned').forEach(refreshRecycledProfileCard);
 
         // Modern friends/profile cards, including x78zum5/xdt5ytf/x12upk82 and x12upk82/xod5an3 structures.
-        document.querySelectorAll(modernProfileCardSelector + ':not(.fb-profile-card-processed)').forEach((card) => {
+        queryIncludingRoot(modernProfileCardSelector).filter(card => !card.classList.contains('fb-profile-card-processed')).forEach((card) => {
             if (isFBCommentSurfaceElement(card)) return;
             card.classList.add('fb-profile-card-processed');
 
@@ -9940,7 +10024,7 @@ const scrubBlockedFriendAndContactCards = () => {
         });
 
         // Friends-page cards and their leftover empty shells expose the target name in the options button aria-label.
-        document.querySelectorAll(optionSelector + ':not(.fb-profile-card-processed)').forEach((button) => {
+        queryIncludingRoot(optionSelector + ':not(.fb-profile-card-processed)').forEach((button) => {
             if (isFBCommentSurfaceElement(button)) return;
             button.classList.add('fb-profile-card-processed');
             const card = findSingleFriendCardShell(button);
@@ -9966,7 +10050,7 @@ const scrubBlockedFriendAndContactCards = () => {
         // v21: Any Facebook friend-list page, not just the logged-in user's own friends page.
         // This catches blocked people by FBID, vanity URL, aria-label/name, profile-picture alt/aria, and URL signals.
         if (isFBFriendsSurfacePath()) {
-            document.querySelectorAll('a[href][aria-label], a[href*="profile.php?id="], a[href*="facebook.com/"]').forEach((link) => {
+            queryIncludingRoot('a[href]').forEach((link) => {
                 try {
                     if (!link || link.classList.contains('fb-profile-card-processed')) return;
                     if (isFBCommentSurfaceElement(link)) return;
@@ -9997,7 +10081,7 @@ const scrubBlockedFriendAndContactCards = () => {
         }
 
         // Right-rail chat/contact rows usually expose FBIDs through /messages/t/<id> links.
-        document.querySelectorAll('a[href*="/messages/t/"], a[href*="messenger.com/t/"]').forEach((link) => {
+        queryIncludingRoot('a[href*="/messages/t/"], a[href*="messenger.com/t/"]').forEach((link) => {
             if (isFBCommentSurfaceElement(link)) return;
             const row = link.closest('[role="listitem"], li, [role="row"], [role="button"]') || link.closest('div') || link;
             if (!row || row.classList.contains('fb-profile-card-banned')) return;
@@ -10014,7 +10098,7 @@ const scrubBlockedFriendAndContactCards = () => {
 
         // v25.4.23: Facebook's right-side contacts can render as plain text/button rows before
         // useful /messages/t/ hrefs appear. Scan individual rows only, scoped to Haukkis strict account.
-        const rightRailRoots = Array.from(document.querySelectorAll('[data-pagelet="RightRail"], [role="complementary"]'));
+        const rightRailRoots = Array.from(queryIncludingRoot('[data-pagelet="RightRail"], [role="complementary"]'));
         rightRailRoots.forEach((rail) => {
             try {
                 rail.querySelectorAll('[role="button"], [role="listitem"], [role="row"], a[href*="/messages/t/"], a[href*="profile.php?id="], a[href*="facebook.com/"]').forEach((seed) => {
@@ -10047,6 +10131,87 @@ const scrubBlockedFriendAndContactCards = () => {
         if (approvedCount > 0) devLog(`Approved ${approvedCount} friend/contact/profile cards`);
     } catch (e) {
         console.log('Error scrubbing friend/contact cards: ' + e.message);
+    }
+};
+
+
+// ===== v61: friends-list live FBID lane =====
+// Friends cards hydrate in pieces. Keep the broad whole-page scanners out of the hot path:
+// child insertions are handled locally by the existing main observer, while this tiny
+// attribute-only observer catches late href/FBID identity hydration before the next paint.
+const getFBFriendCardMutationRootV61 = (node) => {
+    try {
+        const element = node?.nodeType === 1 ? node : node?.parentElement;
+        if (!element || !isFBFriendsSurfacePath()) return null;
+        const main = element.closest?.('[role="main"], main');
+        if (!main) return null;
+
+        const modern = element.closest?.('div.x78zum5.xdt5ytf.x12upk82, div.x12upk82.xod5an3');
+        if (modern && modern !== main) return modern;
+
+        const explicit = element.closest?.('[role="listitem"], li, [role="row"]');
+        if (explicit && explicit !== main) {
+            const profileLinks = explicit.querySelectorAll?.('a[href]')?.length || 0;
+            if (profileLinks <= 10) return explicit;
+        }
+
+        let current = element;
+        for (let depth = 0; current && current !== main && depth < 7; depth++, current = current.parentElement) {
+            if (!current.matches?.('div')) continue;
+            const optionCount = current.querySelectorAll?.('[aria-label*="Lisää vaihtoehtoja kaverille" i], [aria-label*="More options for friend" i]')?.length || 0;
+            const identityCount = current.querySelectorAll?.('a[href], [data-fbid], [data-profileid], [data-profile-id], [data-userid], [data-ownerid]')?.length || 0;
+            if (optionCount === 1 || (identityCount >= 1 && identityCount <= 10)) return current;
+        }
+    } catch (e) {}
+    return null;
+};
+
+let __fbFriendsIdentityAttributeObserverV61 = null;
+let __fbFriendsIdentityAttributeObserverActiveV61 = false;
+const refreshFBFriendsIdentityAttributeObserverV61 = () => {
+    try {
+        const shouldObserve = !!(
+            document.documentElement &&
+            __fbStrictAccountEnabled &&
+            isFBFriendsSurfacePath()
+        );
+
+        if (!shouldObserve) {
+            if (__fbFriendsIdentityAttributeObserverV61 && __fbFriendsIdentityAttributeObserverActiveV61) {
+                try { __fbFriendsIdentityAttributeObserverV61.disconnect(); } catch (e) {}
+            }
+            __fbFriendsIdentityAttributeObserverActiveV61 = false;
+            return false;
+        }
+
+        if (!__fbFriendsIdentityAttributeObserverV61) {
+            __fbFriendsIdentityAttributeObserverV61 = trackObserver(new MutationObserver(mutations => {
+                if (document.hidden || !isFBFriendsSurfacePath() || !__fbStrictAccountEnabled) return;
+                const roots = new Set();
+                for (let i = 0; i < mutations.length && roots.size < 24; i++) {
+                    const root = getFBFriendCardMutationRootV61(mutations[i].target);
+                    if (root) roots.add(root);
+                }
+                roots.forEach(root => {
+                    try { scrubBlockedFriendAndContactCards(root); } catch (e) {}
+                });
+            }));
+        }
+
+        if (!__fbFriendsIdentityAttributeObserverActiveV61) {
+            __fbFriendsIdentityAttributeObserverV61.observe(document.documentElement, {
+                attributes: true,
+                subtree: true,
+                attributeFilter: [
+                    'href', 'data-fbid', 'data-profileid', 'data-profile-id',
+                    'data-userid', 'data-ownerid', 'data-hovercard', 'data-store', 'data-ft'
+                ]
+            });
+            __fbFriendsIdentityAttributeObserverActiveV61 = true;
+        }
+        return true;
+    } catch (e) {
+        return false;
     }
 };
 
@@ -11389,7 +11554,6 @@ const runAllFilters = () => {
         refreshFBSpecificSurfaceHydrationObserverV58();
         if (runFBMessengerNativeMaintenance()) return;
         releaseFBEmbeddedChatPostScannerStateV56(document);
-        scrubFBIsolatedIdentityCarriersNowV56(document);
         if (isFBUserInteractionHotV53()) {
             scheduleFBInteractionSettledPassV53();
             return;
@@ -11413,7 +11577,8 @@ const runAllFilters = () => {
         normalizeFBReelsLinks(document);
         protectFBReelsCurrentLocation();
         refreshAccountScopedFilters();
-        learnFBTrustedProfilesFromFriendsSurface(document);
+        updateFBFriendsSoftGate();
+        refreshFBFriendsIdentityAttributeObserverV61();
         if (commentOverlayActive) {
             hideCriticalNavOnly();
             return;
@@ -11467,9 +11632,9 @@ const initializeFacebookCleaner = () => {
     updateFBFriendsSoftGate();
     refreshAccountScopedFilters();
     installFBEmbeddedChatAndIdentityCSSV56();
-    scrubFBIsolatedIdentityCarriersNowV56(document);
     releaseFBEmbeddedChatPostScannerStateV56(document);
     learnFBTrustedProfilesFromFriendsSurface(document);
+    refreshFBFriendsIdentityAttributeObserverV61();
 
     if (typeof installFBNativeTopSearchHandoff === 'function') installFBNativeTopSearchHandoff();
     installFBReelsLinkPatch();

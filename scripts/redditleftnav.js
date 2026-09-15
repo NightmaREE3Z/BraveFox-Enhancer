@@ -163,7 +163,7 @@
     } catch {}
   }
 
-  // NEW: Ask reddit.js page-world hook (if present) to remove “Answers” everywhere (incl. closed Shadow DOM)
+  // NEW: Ask reddit.js shared Answers helper (if present), then use the local light-DOM fallback
   function nudgeAnswersRemoval() {
     try {
       if (typeof window.__nrRemoveAnswersIn_forAnswers === 'function') {
