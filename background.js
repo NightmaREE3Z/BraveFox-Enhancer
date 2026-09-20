@@ -2307,7 +2307,8 @@ const BRAVEFOX_WEB_ACTION_GRANT_TTL_MS = 60 * 1000;
 // session after one successful password. Sensitive in-page actions remain separate.
 const BRAVEFOX_WEB_SESSION_PAGE_SCOPES = Object.freeze({
     GITHUB_COPILOT: 'github-copilot',
-    GEMINI: 'gemini-google'
+    GEMINI: 'gemini-google',
+    WISEOLDMAN: 'wiseoldman-net'
 });
 
 // Gemini Saved info is intentionally excluded from the normal Gemini session grant.
@@ -2377,6 +2378,10 @@ function bravefoxWebSessionPageScope(rawUrl) {
             /^\/features\/copilot(?:\/|$)/i.test(path)
         )) {
             return BRAVEFOX_WEB_SESSION_PAGE_SCOPES.GITHUB_COPILOT;
+        }
+
+        if (host === 'wiseoldman.net' || host === 'www.wiseoldman.net') {
+            return BRAVEFOX_WEB_SESSION_PAGE_SCOPES.WISEOLDMAN;
         }
     } catch (_) {}
 

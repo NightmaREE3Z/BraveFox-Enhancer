@@ -72,6 +72,7 @@
             'partner.microsoft.com/*',
             'addons.mozilla.org/*',
             'mega.nz*',
+            'wiseoldman.net/*',
             'github.com/NightmaREE3Z*',
             '*github.com/NightmaREE3Z*',
             '*github.com/ungoogled-software*',
