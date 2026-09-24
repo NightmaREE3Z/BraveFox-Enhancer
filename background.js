@@ -2689,6 +2689,7 @@ function bravefoxChatGptProtectedRouteKey(rawUrl) {
         if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'chatgpt.com') return '';
         const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
         const hash = decodeURIComponent(url.hash || '').toLowerCase();
+        if (pathname === '/library/d/6ab47ad73fe88191b5861b9b1f45132a' || pathname.startsWith('/library/d/6ab47ad73fe88191b5861b9b1f45132a/')) return 'library-protected-files';
         if (pathname === '/plugins' || pathname.startsWith('/plugins/')) return 'plugins';
         if (pathname === '/gpts' || pathname.startsWith('/gpts/')) return 'gpts';
         if (hash.startsWith('#settings/personalization')) return 'personalization';
@@ -2758,12 +2759,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const requestId = String(message.requestId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96);
                 if (!requestId) throw new Error('ChatGPT auth request id is missing.');
 
-                const kind = ['protected-route', 'memory-summary', 'plugin-install'].includes(message.kind)
+                const kind = ['protected-route', 'memory-summary', 'plugin-install', 'library-file-delete', 'library-edit-mode'].includes(message.kind)
                     ? message.kind
                     : 'protected-route';
-                const payload = message.payload && typeof message.payload === 'object'
-                    ? { pluginKey: String(message.payload.pluginKey || '').slice(0, 300) }
-                    : {};
+                const sourcePayload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+                const payload = {
+                    pluginKey: String(sourcePayload.pluginKey || '').slice(0, 300),
+                    fileName: String(sourcePayload.fileName || '').slice(0, 500),
+                    href: String(sourcePayload.href || '').slice(0, 1200),
+                    rowText: String(sourcePayload.rowText || '').slice(0, 1200)
+                };
                 const title = String(message.title || 'ChatGPT page is password protected').slice(0, 180);
 
                 const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
