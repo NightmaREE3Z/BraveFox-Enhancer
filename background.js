@@ -131,11 +131,17 @@ const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
     "support.google.com",
     "developers.google.com",
     "store.google.com",
+    "maps.google.com",
+    "earth.google.com",
+    "maps.app.goo.gl",
 ]);
 
 const BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES = Object.freeze([
     Object.freeze({ host: "github.com", pathPrefix: "/paintdotnet" }),
     Object.freeze({ host: "github.com", pathPrefix: "/copilot" }),
+    Object.freeze({ host: "google.com", pathPrefix: "/maps" }),
+    Object.freeze({ host: "google.com", pathPrefix: "/earth" }),
+    Object.freeze({ host: "goo.gl", pathPrefix: "/maps" }),
 ]);
 
 function normalizeBraveFoxExclusionHost(value) {
@@ -147,6 +153,27 @@ function normalizeBraveFoxExclusionPath(value) {
     if (!path.startsWith('/')) path = `/${path}`;
     path = path.replace(/\/{2,}/g, '/').replace(/\/$/, '');
     return path || '/';
+}
+
+function isGoogleMapsOrEarthUrl(value) {
+    try {
+        const parsed = new URL(String(value || ''));
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+        const host = normalizeBraveFoxExclusionHost(parsed.hostname);
+        const pathname = String(parsed.pathname || '/').replace(/\/{2,}/g, '/').toLowerCase();
+        const googleBaseHost = /^google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+        const googleMapsOrEarthHost = /^(?:maps|earth)\.google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+
+        if (host === 'maps.app.goo.gl' || googleMapsOrEarthHost.test(host)) return true;
+        if (host === 'goo.gl') return pathname === '/maps' || pathname.startsWith('/maps/');
+        if (!googleBaseHost.test(host)) return false;
+
+        return pathname === '/maps' || pathname.startsWith('/maps/') ||
+            pathname === '/earth' || pathname.startsWith('/earth/');
+    } catch (_) {
+        return false;
+    }
 }
 
 function isCompletelyExcludedHostname(value) {
@@ -162,6 +189,7 @@ function isCompletelyExcludedHostname(value) {
 }
 
 function isCompletelyExcludedUrl(value) {
+    if (isGoogleMapsOrEarthUrl(value)) return true;
     try {
         const parsed = new URL(value);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;

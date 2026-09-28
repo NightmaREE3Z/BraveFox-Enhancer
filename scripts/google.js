@@ -3,6 +3,28 @@
 
     // google.js of BraveFox Enhancer v29.1.0 Hybrid
 
+    function isGoogleMapsOrEarthUrl(value = window.location.href) {
+        try {
+            const parsed = new URL(String(value || ''));
+            const host = String(parsed.hostname || '')
+                .toLowerCase()
+                .replace(/\.$/, '')
+                .replace(/^www\./, '');
+            const pathname = String(parsed.pathname || '/').replace(/\/{2,}/g, '/').toLowerCase();
+            const googleBaseHost = /^google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+            const googleMapsOrEarthHost = /^(?:maps|earth)\.google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+
+            if (host === 'maps.app.goo.gl' || googleMapsOrEarthHost.test(host)) return true;
+            if (host === 'goo.gl') return pathname === '/maps' || pathname.startsWith('/maps/');
+            if (!googleBaseHost.test(host)) return false;
+
+            return pathname === '/maps' || pathname.startsWith('/maps/') ||
+                pathname === '/earth' || pathname.startsWith('/earth/');
+        } catch (e) {
+            return false;
+        }
+    }
+
     // === INSTANT NON-SEARCH GOOGLE APP ABORT ===
     // Gemini and Google Translate are standalone apps, not Google Search result pages.
     // BraveFox does not filter or modify them at all.
@@ -11,7 +33,8 @@
         .replace(/\.$/, '');
 
     if (initialGoogleHostname === 'gemini.google.com' ||
-        initialGoogleHostname.startsWith('translate.google.')) {
+        initialGoogleHostname.startsWith('translate.google.') ||
+        isGoogleMapsOrEarthUrl()) {
         return;
     }
 
@@ -741,6 +764,7 @@
 
     // === REGIONAL TLD REDIRECTOR ===
     function forceGoogleComAndFi() {
+        if (isGoogleMapsOrEarthUrl()) return false;
         try {
             const urlObj = new URL(window.location.href);
             const hostname = urlObj.hostname.toLowerCase();
@@ -4125,7 +4149,7 @@
     }
 
     function doRedirect(triggerContext, triggerTerm) {
-        if (isRedirecting) return;
+        if (isRedirecting || isGoogleMapsOrEarthUrl()) return;
         logRedirect(triggerContext, triggerTerm);
         isRedirecting = true;
         try { if (domObserver) domObserver.disconnect(); } catch (e) {}
