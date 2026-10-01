@@ -17,7 +17,7 @@
 
     // Function to check if the URL matches a Blogger profile or specific blog post
     const shouldRedirect = (url) => {
-        return url.includes('blogger.com/profile/') || url.includes('draft.blogger.com/profile/') || url.includes('2013/05/') || url.includes('perttas') || url.includes('jiujau') || url.includes('ira-amanda') || url.includes('irpp4')
+        return url.includes('blogger.com/profile/') || url.includes('draft.blogger.com/profile/') || url.includes('2013/05/') || url.includes('perttas') || url.includes('jiujau') || url.includes('ira-amanda') || url.includes('irpp4') ||
                url.includes('irpp4.blogspot.com/2013/06/kesakesakesa-2013.html');
     };
 
@@ -78,7 +78,7 @@
         const captions = document.querySelectorAll('.tr-caption');
         captions.forEach(caption => {
             // Check if the caption contains the specific text
-            if (caption.textContent.includes('')) {
+            if (caption.textContent.includes('meinasin tehä itsarin <3')) {
                 caption.remove();
                 console.log('Removed specific text caption');
             }
@@ -144,9 +144,26 @@
             'div.ngOPAd:nth-child(1)',
             '.mODBC',
             '.VUoKZ',
-	    '#post-body-7627997676987597124',
-	    '#post-body-196438253603317459',
-	    '#post-body-7743031932978651204 > table:nth-child(51) > tbody > tr:nth-child(2) > td',
+            '.table.tr-caption-container:nth-child(51) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(1)',
+            'div.date-outer:nth-child(1) > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > h3:nth-child(5) > a:nth-child(1)',
+            'div.date-outer:nth-child(1) > h2:nth-child(1)',
+            'ul.hierarchy:nth-child(1) > li:nth-child(1) > a:nth-child(2)',
+            '#BlogArchive1',
+            'table.tr-caption-container:nth-child(51) > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(1) > a:nth-child(1) > img:nth-child(1)',
+            'table.tr-caption-container:nth-child(51) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(1)',
+            'div.post-outer:nth-child(2) > div:nth-child(1) > h3:nth-child(5)',
+            'div.post-outer:nth-child(2) > div:nth-child(1)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(5) > div:nth-child(1) > div:nth-child(2)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(5) > div:nth-child(1) > div:nth-child(3)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(5)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(6) > div:nth-child(1) > div:nth-child(2) > a:nth-child(1)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(6) > div:nth-child(1)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(2) > div:nth-child(1) > div:nth-child(2)',
+            '.popular-posts > ul:nth-child(1) > li:nth-child(2) > div:nth-child(1) > div:nth-child(1) > a:nth-child(1) > img:nth-child(1)',
+            '.div.date-outer:nth-child(3) > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > h3:nth-child(5) > a:nth-child(1)',
+            '.table.tr-caption-container:nth-child(20) > tbody:nth-child(1) > tr:nth-child(2) > td:nth-child(1)',
+            '#post-body-7627997676987597124',
+            '#post-body-7743031932978651204 > table:nth-child(51) > tbody > tr:nth-child(2) > td',
             '#post-body-7743031932978651204 > table:nth-child(51) > tbody > tr:nth-child(1) > td > a > img',
             '#Blog1 > div.blog-posts.hfeed > div:nth-child(2) > div > div:nth-child(2) > div > h3 > a',
             '#Blog1 > div.blog-posts.hfeed > div:nth-child(3) > div > div > div > h3 > a',

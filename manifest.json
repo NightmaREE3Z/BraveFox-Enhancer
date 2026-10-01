@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BraveFox Enhancer",
-  "version": "29.1.2",
+  "version": "29.2.0",
   "description": "Makes everyday browsing more peaceful by filtering out content.",
   "background": {
     "service_worker": "background.js",
@@ -32,7 +32,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -49,6 +52,9 @@
         "*://iltalehti.fi/*",
         "*://is.fi/*",
         "*://twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*",
         "*://translate.google.ac/*",
         "*://translate.google.ad/*",
         "*://translate.google.ae/*",
@@ -343,6 +349,9 @@
         "*://iltalehti.fi/*",
         "*://is.fi/*",
         "*://twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*",
         "*://translate.google.ac/*",
         "*://translate.google.ad/*",
         "*://translate.google.ae/*",
@@ -635,7 +644,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -922,7 +934,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -936,7 +951,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -963,7 +981,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://maps.google.com/*",
+        "*://elisa.fi/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -989,7 +1010,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://maps.google.com/*",
+        "*://elisa.fi/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1002,7 +1026,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1015,7 +1042,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1034,7 +1064,10 @@
       "all_frames": true,
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1050,7 +1083,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1065,7 +1101,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1078,7 +1117,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     },
     {
@@ -1095,6 +1137,9 @@
         "*://iltalehti.fi/*",
         "*://twitch.tv/*",
         "*://is.fi/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*",
         "*://translate.google.ac/*",
         "*://translate.google.ad/*",
         "*://translate.google.ae/*",
@@ -1383,7 +1428,10 @@
       "run_at": "document_start",
       "exclude_matches": [
         "*://twitch.tv/*",
-        "*://*.twitch.tv/*"
+        "*://*.twitch.tv/*",
+        "*://elisa.fi/*",
+        "*://maps.google.com/*",
+        "*://google.com/maps/*"
       ]
     }
   ],

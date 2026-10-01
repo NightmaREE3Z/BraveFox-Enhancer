@@ -371,6 +371,7 @@ const msedgeRegex = /^https?:\/\/([a-z0-9-]+\.)*msedge\.net(\/|$|[?#])/i;
 // (for example, "xvideos.com" also permits "www.xvideos.com").
 const allowedSites = new Set([
 	"xvideos.com",
+	"redtube.com",
 	"alastonsuomi.com",
 	"sieni.us",
 	"sieni.es",
@@ -401,6 +402,7 @@ const isAllowlistedHostname = (hostname) => {
 // A base-domain entry also covers its normal subdomains.
 const historyAutoClearSites = new Set([
     "xvideos.com",
+    "redtube.com",
     "alastonsuomi.com",
     "chatgpt.com",
     "openai.com",
@@ -1593,6 +1595,20 @@ const updateBlocklist = async () => {
         }
         allHosts = allHosts.concat(hosts);
     }
+
+    // Packaged lists are an authoritative baseline even when the remote fetch succeeds.
+    // This makes extension updates deterministic: newly bundled entries become effective
+    // immediately instead of waiting for an older remote/cache generation to catch up.
+    let bundledBaselineInputCount = 0;
+    for (const fallbackPath of ['lists/BraveFoxHosts', 'lists/legacyFox']) {
+        const bundledHosts = await fetchHostsFile(chrome.runtime.getURL(fallbackPath));
+        if (Array.isArray(bundledHosts) && bundledHosts.length) {
+            bundledBaselineInputCount += bundledHosts.length;
+            allHosts = allHosts.concat(bundledHosts);
+        }
+    }
+    braveFoxCentralBundledBaselineMerged = false;
+    braveFoxCentralBundledBaselineCount = bundledBaselineInputCount;
     tryGarbageCollection();
 
     // Deduplicate, then remove explicitly allowlisted domains and their subdomains.
@@ -1603,6 +1619,8 @@ const updateBlocklist = async () => {
 
     // Update in-memory hosts list for immediate tab closure checking (ALL hosts)
     hostsListForClosure = new Set(uniqueHostsList);
+    braveFoxCentralBundledBaselineMerged = true;
+    braveFoxCentralBundledBaselineCount = bundledBaselineInputCount;
     console.log(`Updated in-memory hosts list for tab closure: ${hostsListForClosure.size} hosts`);
 
     // Use new dynamic rule management system
@@ -1729,6 +1747,183 @@ const isBlockedUrl = (url) => {
 
     return false;
 };
+
+// === Central URL policy bridge ================================================
+// Content scripts that already filter links/results can ask the background for the
+// same URL verdict BraveFox uses for top-level navigation. Keep the huge fetched
+// hosts list here instead of cloning it into every tab as thousands of regexes.
+const BRAVEFOX_CENTRAL_URL_POLICY_SNAPSHOT_TYPE = 'BRAVEFOX_GET_CENTRAL_URL_POLICY_SNAPSHOT';
+const BRAVEFOX_CENTRAL_URL_POLICY_CLASSIFY_TYPE = 'BRAVEFOX_CLASSIFY_CENTRAL_URLS';
+const BRAVEFOX_CENTRAL_URL_POLICY_MAX_BATCH = 256;
+let braveFoxCentralHostsReadyPromise = null;
+let braveFoxCentralBundledBaselineMerged = false;
+let braveFoxCentralBundledBaselineCount = 0;
+
+// The packaged BraveFoxHosts + legacyFox files are an authoritative baseline, not merely
+// an offline fallback. A stale fetched/cache generation must never make a domain present in
+// the extension package look clean to google.js/facebook.js/archive.js.
+const mergeBraveFoxCentralBundledBaseline = async () => {
+    if (braveFoxCentralBundledBaselineMerged) return braveFoxCentralBundledBaselineCount;
+
+    const mergedHosts = new Set(hostsListForClosure);
+    let bundledCount = 0;
+
+    for (const fallbackPath of ['lists/BraveFoxHosts', 'lists/legacyFox']) {
+        try {
+            const hosts = await fetchHostsFile(chrome.runtime.getURL(fallbackPath));
+            for (const host of Array.isArray(hosts) ? hosts : []) {
+                const normalized = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+                if (!normalized || isAllowlistedHostname(normalized) || isCompletelyExcludedHostname(normalized)) continue;
+                bundledCount++;
+                mergedHosts.add(normalized);
+            }
+        } catch (error) {
+            console.warn(`Central URL policy could not load bundled baseline ${fallbackPath}:`, error);
+        }
+    }
+
+    if (mergedHosts.size) hostsListForClosure = mergedHosts;
+    braveFoxCentralBundledBaselineCount = bundledCount;
+    braveFoxCentralBundledBaselineMerged = true;
+    return bundledCount;
+};
+
+// The MV3 service worker can receive a result-classification message before bootManager()
+// has restored the fetched hosts into memory. Restore persisted chunks on demand, then always
+// union the packaged baseline before returning a verdict.
+const ensureBraveFoxCentralHostsReady = async () => {
+    if (braveFoxCentralHostsReadyPromise) return braveFoxCentralHostsReadyPromise;
+
+    braveFoxCentralHostsReadyPromise = (async () => {
+        if (!hostsListForClosure.size) {
+            try {
+                const cachedHosts = await getAllHostsList();
+                if (Array.isArray(cachedHosts) && cachedHosts.length) {
+                    hostsListForClosure = new Set(cachedHosts);
+                }
+            } catch (error) {
+                console.warn('Central URL policy could not restore cached hosts:', error);
+            }
+        }
+
+        await mergeBraveFoxCentralBundledBaseline();
+        return hostsListForClosure.size;
+    })().finally(() => {
+        braveFoxCentralHostsReadyPromise = null;
+    });
+
+    return braveFoxCentralHostsReadyPromise;
+};
+
+// Match the Firefox Focus Master host semantics: a parent entry such as runway.com
+// also classifies www.runway.com / app.runway.com as blocked. Explicit allowlists are
+// still evaluated before this helper and therefore retain priority.
+const findBraveFoxCentralBlockedHost = (hostname) => {
+    let candidate = String(hostname || '').trim().toLowerCase().replace(/\.$/, '');
+    while (candidate) {
+        if (hostsListForClosure.has(candidate)) return candidate;
+        const dot = candidate.indexOf('.');
+        if (dot < 0) break;
+        candidate = candidate.slice(dot + 1);
+    }
+    return '';
+};
+
+const getBraveFoxCentralUrlPolicySnapshot = async () => {
+    await ensureBraveFoxCentralHostsReady();
+    return {
+        allowedHosts: Array.from(new Set([
+            ...BRAVEFOX_COMPLETE_EXCLUSION_HOSTS,
+            ...allowedSites
+        ])),
+        allowedPathRules: BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.map(rule => ({ ...rule })),
+        blockedSites: blockedSites.slice(),
+        blockedTLDs: blockedTLDs.slice(),
+        fetchedHostsCount: hostsListForClosure.size,
+        bundledHostsCount: braveFoxCentralBundledBaselineCount
+    };
+};
+
+const classifyBraveFoxCentralUrl = async (value) => {
+    await ensureBraveFoxCentralHostsReady();
+    const raw = String(value || '').trim();
+    if (!raw) return { action: 'none', url: '', hostname: '' };
+
+    let parsed = null;
+    try {
+        parsed = new URL(raw);
+    } catch (_) {
+        try {
+            if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[\/:?#]|$)/i.test(raw)) {
+                parsed = new URL(`https://${raw}`);
+            }
+        } catch (_) {}
+    }
+
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+        return { action: 'none', url: raw, hostname: '' };
+    }
+
+    const href = parsed.href;
+    const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+
+    if (isBraveFoxCompletelyExcludedUrl(href)) {
+        return { action: 'allow', url: href, hostname, source: 'BRAVEFOX_COMPLETE_EXCLUSION_HOSTS' };
+    }
+
+    if (isAllowlistedHostname(hostname)) {
+        return { action: 'allow', url: href, hostname, source: 'allowedSites' };
+    }
+
+    const blockedHost = findBraveFoxCentralBlockedHost(hostname);
+    if (blockedHost) {
+        return { action: 'block', url: href, hostname, source: 'fetched-hosts', blockedHost };
+    }
+
+    if (isBlockedUrl(href)) {
+        return { action: 'block', url: href, hostname, source: 'background-block-policy' };
+    }
+
+    return { action: 'none', url: href, hostname, source: 'none' };
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === BRAVEFOX_CENTRAL_URL_POLICY_SNAPSHOT_TYPE) {
+        (async () => {
+            try {
+                sendResponse({ ok: true, snapshot: await getBraveFoxCentralUrlPolicySnapshot() });
+            } catch (error) {
+                sendResponse({ ok: false, error: error?.message || String(error) });
+            }
+        })();
+        return true;
+    }
+
+    if (message.type === BRAVEFOX_CENTRAL_URL_POLICY_CLASSIFY_TYPE) {
+        (async () => {
+            try {
+                const input = Array.isArray(message.urls) ? message.urls : [];
+                const urls = Array.from(new Set(input.map(value => String(value || '').trim()).filter(Boolean)))
+                    .slice(0, BRAVEFOX_CENTRAL_URL_POLICY_MAX_BATCH);
+                const verdicts = await Promise.all(urls.map(classifyBraveFoxCentralUrl));
+                sendResponse({
+                    ok: true,
+                    verdicts,
+                    fetchedHostsCount: hostsListForClosure.size,
+                    bundledHostsCount: braveFoxCentralBundledBaselineCount
+                });
+            } catch (error) {
+                sendResponse({ ok: false, error: error?.message || String(error), verdicts: [] });
+            }
+        })();
+        return true;
+    }
+
+    return false;
+});
+
 
 // === NEW: BraveFox System/Extensions page redirect helpers ===
 const EXT_PROTOCOLS = ['chrome', 'edge', 'brave', 'opera', 'vivaldi'];
