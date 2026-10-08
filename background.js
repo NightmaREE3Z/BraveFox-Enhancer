@@ -876,6 +876,7 @@ const blockedSites = [
    "download.fi",
    "vsco.co",
    "pinterest.com",
+   "redgifs.com",
    "gemini.google.com",
    "instagram.com/m1mmuska",
    "tiktok.com/@karabr",
