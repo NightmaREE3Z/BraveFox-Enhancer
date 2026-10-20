@@ -373,9 +373,13 @@ const allowedSites = new Set([
 	"xvideos.com",
 	"redtube.com",
 	"alastonsuomi.com",
+	"thumbzilla.com",
+	"youporn.com",
+	"pornhub.com",
 	"sieni.us",
 	"sieni.es",
 	"fastvid.xyz",
+	"redgifs.com",
 ]);
 
 // Dedicated high-priority DNR allow rule. This immediately overrides any older
@@ -403,6 +407,10 @@ const isAllowlistedHostname = (hostname) => {
 const historyAutoClearSites = new Set([
     "xvideos.com",
     "redtube.com",
+    "thumbzilla.com",
+    "redgifs.com",
+    "youporn.com",
+    "pornhub.com",
     "alastonsuomi.com",
     "chatgpt.com",
     "openai.com",
@@ -876,7 +884,6 @@ const blockedSites = [
    "download.fi",
    "vsco.co",
    "pinterest.com",
-   "redgifs.com",
    "gemini.google.com",
    "instagram.com/m1mmuska",
    "tiktok.com/@karabr",
@@ -1134,8 +1141,49 @@ const fetchHostsFile = async (url) => {
     return await fetchHostsFileWithRetry(url);
 };
 
+// Compare the effective stored hosts set before touching the chunk keys. Rewriting the
+// same set (or only changing its order) resets google.js's central-policy generation
+// and briefly hides already-approved results. Missing/corrupt chunks are not trusted.
+const hasStoredHostsSetChanged = async (list) => {
+    try {
+        const meta = await chrome.storage.local.get(['hostsChunks', 'hostsTotal']);
+        const count = meta.hostsChunks;
+        if (!Number.isSafeInteger(count) || count < 1 || count > 1000 ||
+            !Number.isSafeInteger(meta.hostsTotal) || meta.hostsTotal < 0) return true;
+
+        const chunkKeys = [];
+        for (let i = 0; i < count; i++) chunkKeys.push(`hostsChunk_${i}`);
+        const chunksObj = await chrome.storage.local.get(chunkKeys);
+        const storedSet = new Set();
+        let storedCount = 0;
+
+        for (let i = 0; i < count; i++) {
+            const chunk = chunksObj[`hostsChunk_${i}`];
+            if (!Array.isArray(chunk)) return true;
+            storedCount += chunk.length;
+            for (const host of chunk) storedSet.add(host);
+        }
+
+        if (storedCount !== meta.hostsTotal) return true;
+        const freshSet = new Set(list);
+        if (storedSet.size !== freshSet.size) return true;
+        for (const host of freshSet) {
+            if (!storedSet.has(host)) return true;
+        }
+        return false;
+    } catch (error) {
+        console.warn('Could not compare cached hosts; performing normal storage update:', error);
+        return true;
+    }
+};
+
 // Store the fetched hosts list in local storage (CHUNKED to avoid quota exceeded!)
-const storeHostsList = (list) => {
+const storeHostsList = async (list) => {
+    if (!(await hasStoredHostsSetChanged(list))) {
+        console.log(`Hosts set unchanged (${new Set(list).size} hosts); preserving stored chunks and lastUpdate.`);
+        return false;
+    }
+
     // Chunk size chosen to stay well below Chrome's per-item quota
     const chunkSize = 25000;
     const chunks = [];
@@ -1153,12 +1201,16 @@ const storeHostsList = (list) => {
         storageObj[`hostsChunk_${idx}`] = chunk;
     });
 
-    chrome.storage.local.set(storageObj, () => {
-        if (chrome.runtime.lastError) {
-            console.error('Error storing hosts list:', chrome.runtime.lastError);
-        } else {
-            console.log(`Hosts list stored: ${list.length} hosts in ${chunks.length} chunks`);
-        }
+    return await new Promise(resolve => {
+        chrome.storage.local.set(storageObj, () => {
+            if (chrome.runtime.lastError) {
+                console.error('Error storing hosts list:', chrome.runtime.lastError);
+                resolve(false);
+            } else {
+                console.log(`Hosts list stored: ${list.length} hosts in ${chunks.length} chunks`);
+                resolve(true);
+            }
+        });
     });
 };
 
@@ -1584,15 +1636,19 @@ const updateBlocklist = async () => {
 
     // Fetch and concat all hosts files
     let allHosts = [];
+    let incompleteSources = false;
     
     // NEW: Cache buster to force a true fetch from GitHub/CDN on every extension refresh
     const cacheBuster = `?force_refresh=${Date.now()}`;
     for (const source of sources) {
         const fetchUrl = source.url + cacheBuster;
         let hosts = await fetchHostsFile(fetchUrl);
-        if (!hosts.length && source.fallbackPath) {
-            console.warn(`Remote ${source.id} fetch failed; loading bundled fallback.`);
-            hosts = await fetchHostsFile(chrome.runtime.getURL(source.fallbackPath));
+        if (!hosts.length) {
+            incompleteSources = true;
+            if (source.fallbackPath) {
+                console.warn(`Remote ${source.id} fetch failed; loading bundled fallback.`);
+                hosts = await fetchHostsFile(chrome.runtime.getURL(source.fallbackPath));
+            }
         }
         allHosts = allHosts.concat(hosts);
     }
@@ -1608,6 +1664,20 @@ const updateBlocklist = async () => {
             allHosts = allHosts.concat(bundledHosts);
         }
     }
+    // Do not shrink an established blocking set because one network source failed.
+    // Retain previously known domains until every remote source can be refreshed.
+    // New bundled/available entries are still merged and remain authoritative.
+    if (incompleteSources) {
+        const cachedHosts = await getAllHostsList();
+        if (cachedHosts.length) {
+            allHosts = allHosts.concat(cachedHosts);
+            console.warn(`Incomplete hosts refresh: preserving ${cachedHosts.length} cached entries alongside available sources.`);
+        } else if (!allHosts.length) {
+            console.warn('All hosts sources unavailable; keeping current in-memory/DNR policy unchanged.');
+            return;
+        }
+    }
+
     braveFoxCentralBundledBaselineMerged = false;
     braveFoxCentralBundledBaselineCount = bundledBaselineInputCount;
     tryGarbageCollection();
@@ -1631,8 +1701,8 @@ const updateBlocklist = async () => {
     // high-priority allow rule after rebuilding the block rules.
     await updateAllowlistRules();
     
-    // Store full list regardless of DNR limits
-    storeHostsList(uniqueHostsList);
+    // Store full list regardless of DNR limits; identical sets must not rewrite the chunks.
+    await storeHostsList(uniqueHostsList);
     console.log("Blocklist has been updated.");
 
     allHosts = null;
@@ -1832,6 +1902,28 @@ const findBraveFoxCentralBlockedHost = (hostname) => {
 
 const getBraveFoxCentralUrlPolicySnapshot = async () => {
     await ensureBraveFoxCentralHostsReady();
+    // During cold start/update the in-memory policy can already include bundled
+    // or newly fetched hosts that have not landed in the chunked storage yet.
+    // Send only the missing entries to the portable Google checker, capped to
+    // avoid multi-megabyte runtime messages. A larger gap uses the safe bridge.
+    let bundledHostOverlay = [];
+    let bundledOverlayComplete = true;
+    try {
+        const stored = new Set(await getAllHostsList());
+        for (const host of hostsListForClosure) {
+            if (stored.has(host)) continue;
+            bundledHostOverlay.push(host);
+            if (bundledHostOverlay.length > 512) {
+                bundledHostOverlay = [];
+                bundledOverlayComplete = false;
+                break;
+            }
+        }
+    } catch (error) {
+        bundledHostOverlay = [];
+        bundledOverlayComplete = false;
+    }
+    if (bundledOverlayComplete) bundledHostOverlay.sort();
     return {
         allowedHosts: Array.from(new Set([
             ...BRAVEFOX_COMPLETE_EXCLUSION_HOSTS,
@@ -1841,7 +1933,9 @@ const getBraveFoxCentralUrlPolicySnapshot = async () => {
         blockedSites: blockedSites.slice(),
         blockedTLDs: blockedTLDs.slice(),
         fetchedHostsCount: hostsListForClosure.size,
-        bundledHostsCount: braveFoxCentralBundledBaselineCount
+        bundledHostsCount: braveFoxCentralBundledBaselineCount,
+        bundledHostOverlay,
+        bundledOverlayComplete
     };
 };
 
@@ -3498,18 +3592,19 @@ const bootManager = async () => {
             
             if (!sessionState.is_sw_awake) {
                 console.log('🔄 Extension Manually Reloaded or Cold Started!');
-                console.log('🧹 Wiping local cache to force a totally fresh network fetch...');
-                
+                console.log('🔄 Keeping cached hosts active while fetching a fresh blocklist...');
+
                 await chrome.storage.session.set({ is_sw_awake: true });
-                
+
+                // Preserve hostsChunk_*, hostsChunks, hostsTotal and lastUpdate across
+                // extension updates/restarts. initializeExtension loads this protection
+                // immediately, then fetches fresh sources and commits only real changes.
                 const keysToRemove = [
-                    'hostsChunks', 'hostsTotal', 'lastUpdate', 
                     'wrestling_women_urls_time', 'wrestling_women_urls', 'v27_chrome_bump'
                 ];
-                for (let i = 0; i < 100; i++) keysToRemove.push(`hostsChunk_${i}`);
-                
+
                 await new Promise(resolve => chrome.storage.local.remove(keysToRemove, resolve));
-                
+
                 await initializeExtension();
             } else {
                 console.log('💤 Service Worker woke up. Loading from local memory (skipping network spam)...');
