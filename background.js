@@ -373,6 +373,8 @@ const allowedSites = new Set([
 	"xvideos.com",
 	"redtube.com",
 	"alastonsuomi.com",
+	"bunkr.cr",
+	"balbums.st",
 	"thumbzilla.com",
 	"youporn.com",
 	"pornhub.com",
@@ -411,6 +413,8 @@ const historyAutoClearSites = new Set([
     "redgifs.com",
     "youporn.com",
     "pornhub.com",
+    "bunkr.cr",
+    "balbums.st",
     "alastonsuomi.com",
     "chatgpt.com",
     "openai.com",
@@ -703,7 +707,7 @@ const ensureInitialHistoryAutoClearPurge = async () => {
 const updateAllowlistRules = async () => {
     const trusted = getBraveFoxExclusionDescriptors();
     const domainRules = Array.from(new Set([...allowedSites, ...trusted.domains])).map(domain => ({
-        urlFilter: `||${domain}/`,
+        urlFilter: `||${domain}^`,
         label: domain
     }));
     const pathRules = trusted.pathRules.map(rule => ({
@@ -817,7 +821,6 @@ const blockedSites = [
    "ccleaner-browser.en.uptodown.com",
    "uptodown.com/windows/chromium",
    "chromium.uptodown.com",
-   "instagram.com/explore",
    "chromium.en.uptodown.com",
    "chromium.uptodown.com/windows",
    "chromium.en.uptodown.com/windows",
@@ -864,6 +867,21 @@ const blockedSites = [
    "apps.microsoft.com/detail/9mxbp1fb84cq",
    "apps.microsoft.com/detail/9nh2gph4jzs4",
    "apps.microsoft.com/detail/9nrtvfllggtv",
+   "a/JldxWY54",
+   "a/R3UmItwV",
+   "a/MssYJFJt",
+   "f/r4tcMhbAirsDJ",
+   "f/wOza8H8xn1YFV",
+   "f/DKw45ExJ99P7P",
+   "f/qTwJDQ0xRFuX5",
+   "f/Xcj7kczZCrkaW",
+   "f/xnl3Q9MoicCHt",
+   "f/bpTBVUY8P8q9z",
+   "f/E17wc5RWVSpJu",
+   "f/UwuF7kGBy7Q0P",
+   "f/FRxc0A0I4erng",
+   "f/71TZ2FuIcxIFQ",
+   "f/zFbwdDyzpvTdI",
    "viamaker.uptodown.com",
    "viamaker.en.uptodown.com",
    "capcut.uptodown.com",
@@ -885,7 +903,6 @@ const blockedSites = [
    "vsco.co",
    "pinterest.com",
    "gemini.google.com",
-   "instagram.com/m1mmuska",
    "tiktok.com/@karabr",
    "tiktok.com/@kara",
    "tiktok.com/@karts",
@@ -1262,331 +1279,128 @@ const tryGarbageCollection = () => {
     }
 };
 
-// COMPLETELY REWRITTEN: Nuclear-level rule cleanup and smart ID assignment
+// Incremental DNR host-rule management. Preserve high-priority allow rules, incognito
+// rules, and unchanged host rules; only BraveFox-owned host blocks use 50000-60000.
+// DNR is an on-disk browser rule engine, not a JavaScript heap cache: clearing and
+// rebuilding every rule does not improve RAM usage and can briefly remove protection.
+const BRAVEFOX_DNR_HOST_RULE_START = 50000;
+const BRAVEFOX_DNR_HOST_RULE_END = 60000;
+
+function normalizeBraveFoxBlockedHost(value) {
+    const host = String(value || '').trim().toLowerCase().replace(/\.$/, '');
+    return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)
+        ? host : '';
+}
+
+function getBraveFoxManagedDnrHost(rule) {
+    if (!rule || rule.id < BRAVEFOX_DNR_HOST_RULE_START ||
+        rule.id > BRAVEFOX_DNR_HOST_RULE_END || rule.action?.type !== 'block' ||
+        rule.priority !== 1 || !rule.condition?.resourceTypes?.includes('main_frame')) return '';
+    const filter = String(rule.condition.urlFilter || '');
+    const newMatch = filter.match(/^\|\|([a-z0-9.-]+)\^$/i);
+    const oldMatch = filter.match(/^\*:\/\/([a-z0-9.-]+)\/\*$/i);
+    return normalizeBraveFoxBlockedHost((newMatch || oldMatch || [])[1]);
+}
+
 const manageDynamicRules = async (hostsList) => {
-    return new Promise(async (resolve) => {
-        try {
-            console.log('🚀 Starting NUCLEAR-level dynamic rule management...');
-            
-            // Step 1: NUCLEAR cleanup - Clear everything possible
-            console.log('☢️ Step 1: NUCLEAR rule cleanup (multiple passes)...');
-            
-            let cleanupPasses = 0;
-            const maxCleanupPasses = 5;
-            let totalRulesCleared = 0;
-            
-            while (cleanupPasses < maxCleanupPasses) {
-                cleanupPasses++;
-                console.log(`☢️ Cleanup pass ${cleanupPasses}/${maxCleanupPasses}`);
-                
-                // Get current rules
-                const currentRules = await chrome.declarativeNetRequest.getDynamicRules();
-                console.log(`   Found ${currentRules.length} existing rules`);
-                
-                if (currentRules.length === 0) {
-                    console.log('✅ No more rules found, cleanup complete');
-                    break;
-                }
-                
-                // Build comprehensive removal list
-                const existingIds = currentRules.map(rule => rule.id);
-                const suspiciousIds = [];
-                
-                // Add potential orphan IDs in common ranges (expanded)
-                for (let i = 1; i <= 60000; i++) {
-                    if (!existingIds.includes(i)) {
-                        suspiciousIds.push(i);
-                    }
-                }
-                
-                // Combine all IDs for removal (existing + potential orphans)
-                const allIdsToRemove = [...new Set([...existingIds, ...suspiciousIds])];
-                
-                console.log(`   Attempting to remove ${allIdsToRemove.length} IDs (${existingIds.length} confirmed + ${suspiciousIds.length} potential orphans)`);
-                
-                // Perform removal in chunks to avoid overwhelming Chrome
-                const removalChunkSize = 5000;
-                for (let chunkStart = 0; chunkStart < allIdsToRemove.length; chunkStart += removalChunkSize) {
-                    const chunkEnd = Math.min(chunkStart + removalChunkSize, allIdsToRemove.length);
-                    const chunk = allIdsToRemove.slice(chunkStart, chunkEnd);
-                    
-                    await new Promise((chunkResolve) => {
-                        chrome.declarativeNetRequest.updateDynamicRules({
-                            removeRuleIds: chunk
-                        }, () => {
-                            if (chrome.runtime.lastError) {
-                                console.warn(`   ⚠️ Removal chunk ${Math.floor(chunkStart/removalChunkSize) + 1} warning: ${chrome.runtime.lastError.message}`);
-                            } else {
-                                console.log(`   ✅ Removal chunk ${Math.floor(chunkStart/removalChunkSize) + 1} completed`);
-                            }
-                            chunkResolve();
-                        });
-                    });
-                    
-                    // Small delay between removal chunks
-                    await new Promise(resolve => {
-                        const timeoutId = setTimeout(resolve, 100);
-                        resourceTracker.addTimeout(timeoutId);
-                    });
-                }
-                
-                // Wait longer for Chrome to process the removals
-                await new Promise(resolve => {
-                    const timeoutId = setTimeout(resolve, 2000);
-                    resourceTracker.addTimeout(timeoutId);
-                });
-                
-                // Verify removal
-                const postRemovalRules = await chrome.declarativeNetRequest.getDynamicRules();
-                const rulesRemoved = currentRules.length - postRemovalRules.length;
-                totalRulesCleared += rulesRemoved;
-                
-                console.log(`   📊 Pass ${cleanupPasses} result: ${rulesRemoved} rules removed, ${postRemovalRules.length} remaining`);
-                
-                if (postRemovalRules.length === 0) {
-                    console.log('✅ All rules successfully removed');
-                    break;
-                }
-                
-                // If we're stuck with the same number of rules, try a different approach
-                if (rulesRemoved === 0 && cleanupPasses > 2) {
-                    console.warn('⚠️ No progress made, attempting alternative cleanup...');
-                    
-                    // Try removing in smaller chunks
-                    const remainingIds = postRemovalRules.map(rule => rule.id);
-                    for (let i = 0; i < remainingIds.length; i += 10) {
-                        const smallChunk = remainingIds.slice(i, i + 10);
-                        await new Promise((smallResolve) => {
-                            chrome.declarativeNetRequest.updateDynamicRules({
-                                removeRuleIds: smallChunk
-                            }, () => {
-                                smallResolve();
-                            });
-                        });
-                        await new Promise(resolve => {
-                            const timeoutId = setTimeout(resolve, 50);
-                            resourceTracker.addTimeout(timeoutId);
-                        });
-                    }
-                    await new Promise(resolve => {
-                        const timeoutId = setTimeout(resolve, 1000);
-                        resourceTracker.addTimeout(timeoutId);
-                    });
-                }
+    try {
+        const allRules = await chrome.declarativeNetRequest.getDynamicRules();
+        const occupiedIds = new Set(allRules.map(rule => rule.id));
+        const oldHostRules = allRules.map(rule => ({
+            rule, host: getBraveFoxManagedDnrHost(rule)
+        })).filter(row => Boolean(row.host));
+        const maxHostRules = BRAVEFOX_DNR_HOST_RULE_END - BRAVEFOX_DNR_HOST_RULE_START + 1;
+        const hosts = Array.from(new Set((Array.isArray(hostsList) ? hostsList : [])
+            .map(normalizeBraveFoxBlockedHost).filter(Boolean))).slice(0, maxHostRules);
+        const wanted = new Set(hosts);
+        const retainedHosts = new Set();
+        const removeIds = [];
+        const addRules = [];
+        const freeIds = [];
+
+        for (const { rule, host } of oldHostRules) {
+            const desiredFilter = `||${host}^`;
+            if (!wanted.has(host) || retainedHosts.has(host)) {
+                removeIds.push(rule.id);
+                freeIds.push(rule.id);
+                continue;
             }
-            
-            console.log(`☢️ Cleanup completed: ${totalRulesCleared} total rules cleared across ${cleanupPasses} passes`);
-            
-            // Step 2: Final state verification and available ID detection (SHIFTED RANGE)
-            console.log('🔍 Step 2: Detecting available rule ID slots (higher range)...');
-            
-            const finalExistingRules = await chrome.declarativeNetRequest.getDynamicRules();
-            const occupiedIds = new Set(finalExistingRules.map(rule => rule.id));
-            
-            console.log(`   Current state: ${finalExistingRules.length} rules still exist`);
-            if (finalExistingRules.length > 0) {
-                console.log(`   Occupied IDs: ${Array.from(occupiedIds).slice(0, 20).join(', ')}${occupiedIds.size > 20 ? '...' : ''}`);
-            }
-            
-            // Find available ID slots starting from 50000 (HIGHER RANGE to avoid conflicts)
-            const availableIds = [];
-            for (let i = 50000; i <= 60000; i++) {
-                if (!occupiedIds.has(i)) {
-                    availableIds.push(i);
-                }
-            }
-            
-            // Reserve space for incognito rules (29999, 30000 - keep as-is for compatibility)
-            const reservedIds = new Set([29999, 30000]);
-            const usableIds = availableIds.filter(id => !reservedIds.has(id));
-            
-            console.log(`   Available ID slots: ${usableIds.length} (range 50000-60000)`);
-            console.log(`   Reserved slots: ${Array.from(reservedIds).join(', ')}`);
-            
-            // Step 3: Calculate how many rules we can actually add
-            const rulesToAdd = Math.min(hostsList.length, usableIds.length);
-            const limitedHostsList = hostsList.slice(0, rulesToAdd);
-            
-            console.log(`📊 Rule planning:`);
-            console.log(`   - Total hosts available: ${hostsList.length}`);
-            console.log(`   - Available ID slots: ${usableIds.length}`);
-            console.log(`   - Rules we will attempt to add: ${rulesToAdd}`);
-            
-            if (rulesToAdd === 0) {
-                console.log('❌ No available ID slots for new rules');
-                resolve();
-                return;
-            }
-            
-            // Step 4: Create rules using available IDs
-            console.log('🏗️ Step 4: Creating rules with available IDs...');
-            
-            const rulesToCreate = [];
-            for (let i = 0; i < rulesToAdd; i++) {
-                const host = limitedHostsList[i];
-                const ruleId = usableIds[i]; // Use available ID slots
-                
-                rulesToCreate.push({
-                    id: ruleId,
-                    priority: 1,
-                    action: { type: 'block' },
-                    condition: { urlFilter: `*://${host}/*`, resourceTypes: ['main_frame'] }
+            retainedHosts.add(host);
+            if (rule.condition.urlFilter !== desiredFilter ||
+                rule.condition.isUrlFilterCaseSensitive === true) {
+                removeIds.push(rule.id);
+                addRules.push({
+                    id: rule.id, priority: 1, action: { type: 'block' },
+                    condition: { urlFilter: desiredFilter, resourceTypes: ['main_frame'],
+                        isUrlFilterCaseSensitive: false }
                 });
             }
-            
-            console.log(`✅ Created ${rulesToCreate.length} rule definitions`);
-            console.log(`   ID range: ${rulesToCreate[0]?.id} to ${rulesToCreate[rulesToCreate.length-1]?.id}`);
-            
-            // Step 5: Add rules using multiple strategies
-            console.log('🚀 Step 5: Adding rules to Chrome...');
-            
-            let additionSuccess = false;
-            let successfulRulesAdded = 0;
-            
-            // Strategy 1: Single batch for smaller rule sets
-            if (!additionSuccess && rulesToCreate.length <= 5000) {
-                console.log('🎯 Strategy 1: Single batch addition...');
-                
-                additionSuccess = await new Promise((addResolve) => {
-                    chrome.declarativeNetRequest.updateDynamicRules({
-                        addRules: rulesToCreate
-                    }, () => {
-                        if (chrome.runtime.lastError) {
-                            console.warn(`⚠️ Single batch failed: ${chrome.runtime.lastError.message}`);
-                            addResolve(false);
-                        } else {
-                            console.log(`✅ Single batch success: ${rulesToCreate.length} rules added`);
-                            successfulRulesAdded = rulesToCreate.length;
-                            addResolve(true);
-                        }
-                    });
-                });
-            }
-            
-            // Strategy 2: Medium batches
-            if (!additionSuccess) {
-                console.log('🎯 Strategy 2: Medium batch addition...');
-                
-                const batchSize = 1000;
-                let batchesSuccessful = 0;
-                
-                for (let start = 0; start < rulesToCreate.length; start += batchSize) {
-                    const end = Math.min(start + batchSize, rulesToCreate.length);
-                    const batch = rulesToCreate.slice(start, end);
-                    
-                    const batchNum = Math.floor(start / batchSize) + 1;
-                    const totalBatches = Math.ceil(rulesToCreate.length / batchSize);
-                    
-                    console.log(`📦 Batch ${batchNum}/${totalBatches}: IDs ${batch[0].id}-${batch[batch.length-1].id} (${batch.length} rules)`);
-                    
-                    const batchSuccess = await new Promise((batchResolve) => {
-                        chrome.declarativeNetRequest.updateDynamicRules({
-                            addRules: batch
-                        }, () => {
-                            if (chrome.runtime.lastError) {
-                                console.error(`❌ Batch ${batchNum} fucking failed, lmao: ${chrome.runtime.lastError.message}`);
-                                batchResolve(false);
-                            } else {
-                                console.log(`✅ Batch ${batchNum} success: ${batch.length} rules`);
-                                batchResolve(true);
-                            }
-                        });
-                    });
-                    
-                    if (batchSuccess) {
-                        batchesSuccessful++;
-                        successfulRulesAdded += batch.length;
-                        // Delay between successful batches
-                        if (start + batchSize < rulesToCreate.length) {
-                            await new Promise(resolve => {
-                                const timeoutId = setTimeout(resolve, 300);
-                                resourceTracker.addTimeout(timeoutId);
-                            });
-                        }
-                    } else {
-                        console.warn(`🛑 Stopping at batch ${batchNum} due to failure`);
-                        break;
-                    }
-                }
-                
-                if (batchesSuccessful > 0) {
-                    additionSuccess = true;
-                    console.log(`✅ Medium batch strategy: ${batchesSuccessful} batches succeeded`);
-                }
-            }
-            
-            // Strategy 3: Small batches (last resort)
-            if (!additionSuccess) {
-                console.log('🎯 Strategy 3: Small batch addition (last resort)...');
-                
-                const smallBatchSize = 100;
-                
-                for (let start = 0; start < Math.min(rulesToCreate.length, 5000); start += smallBatchSize) {
-                    const end = Math.min(start + smallBatchSize, rulesToCreate.length);
-                    const batch = rulesToCreate.slice(start, end);
-                    
-                    const batchNum = Math.floor(start / smallBatchSize) + 1;
-                    
-                    console.log(`📦 Small batch ${batchNum}: IDs ${batch[0].id}-${batch[batch.length-1].id} (${batch.length} rules)`);
-                    
-                    const batchSuccess = await new Promise((batchResolve) => {
-                        chrome.declarativeNetRequest.updateDynamicRules({
-                            addRules: batch
-                        }, () => {
-                            if (chrome.runtime.lastError) {
-                                console.error(`❌ Small batch ${batchNum} failed: ${chrome.runtime.lastError.message}`);
-                                batchResolve(false);
-                            } else {
-                                console.log(`✅ Small batch ${batchNum} success: ${batch.length} rules`);
-                                batchResolve(true);
-                            }
-                        });
-                    });
-                    
-                    if (batchSuccess) {
-                        successfulRulesAdded += batch.length;
-                        await new Promise(resolve => {
-                            const timeoutId = setTimeout(resolve, 100);
-                            resourceTracker.addTimeout(timeoutId);
-                        });
-                    } else {
-                        console.warn(`🛑 Stopping small batch addition at batch ${batchNum}`);
-                        break;
-                    }
-                }
-                
-                if (successfulRulesAdded > 0) {
-                    additionSuccess = true;
-                }
-            }
-            
-            // Step 6: Final verification and reporting
-            console.log('📊 Step 6: Final verification...');
-            
-            const finalRules = await chrome.declarativeNetRequest.getDynamicRules();
-            const newRulesAdded = finalRules.length - finalExistingRules.length;
-            
-            console.log(`🎉 FINAL RESULTS:`);
-            console.log(`   - Rules before operation: ${finalExistingRules.length}`);
-            console.log(`   - Rules after operation: ${finalRules.length}`);
-            console.log(`   - Net new rules added: ${newRulesAdded}`);
-            console.log(`   - Target rules attempted: ${rulesToCreate.length}`);
-            console.log(`   - Success rate: ${((newRulesAdded / rulesToCreate.length) * 100).toFixed(1)}%`);
-            console.log(`   - Hosts available for tab closure: ${hostsList.length} (ALL HOSTS)`);
-            
-            if (newRulesAdded > 0) {
-                console.log(`✅ Dynamic rule management completed with ${newRulesAdded} rules added`);
-            } else {
-                console.warn(`⚠️ No new rules added, but tab closure still works for ALL ${hostsList.length} hosts`);
-            }
-            
-            resolve();
-            
-        } catch (error) {
-            console.error('💥 CRITICAL ERROR in manageDynamicRules:', error);
-            resolve();
         }
-    });
+
+        // Never take IDs belonging to another component's dynamic rules.
+        for (let id = BRAVEFOX_DNR_HOST_RULE_START; id <= BRAVEFOX_DNR_HOST_RULE_END; id++) {
+            if (!occupiedIds.has(id)) freeIds.push(id);
+        }
+        const free = [...new Set(freeIds)].sort((a, b) => a - b);
+        let freeIndex = 0;
+        for (const host of hosts) {
+            if (retainedHosts.has(host)) continue;
+            const id = free[freeIndex++];
+            if (id === undefined) break;
+            addRules.push({
+                id, priority: 1, action: { type: 'block' },
+                condition: { urlFilter: `||${host}^`, resourceTypes: ['main_frame'],
+                    isUrlFilterCaseSensitive: false }
+            });
+        }
+
+        if (!removeIds.length && !addRules.length) {
+            console.log(`DNR host rules unchanged (${retainedHosts.size} retained).`);
+            return true;
+        }
+
+        // Chrome applies each batch atomically. Replacements remove and add the same ID
+        // together; unrelated dynamic rules are never deleted. Keep old coverage on
+        // failure and report errors rather than silently declaring a successful rebuild.
+        const replacementIds = new Set(addRules.map(rule => rule.id));
+        const obsoleteIds = removeIds.filter(id => !replacementIds.has(id));
+        const pendingAdds = addRules.slice();
+        const pendingRemovals = removeIds.filter(id => replacementIds.has(id));
+        const batchSize = 500;
+        let successfulAdds = 0;
+        while (pendingAdds.length || pendingRemovals.length) {
+            const addBatch = pendingAdds.splice(0, batchSize);
+            const addIds = new Set(addBatch.map(rule => rule.id));
+            const removeBatch = pendingRemovals.filter(id => addIds.has(id));
+            pendingRemovals.splice(0, pendingRemovals.length,
+                ...pendingRemovals.filter(id => !addIds.has(id)));
+            try {
+                await chrome.declarativeNetRequest.updateDynamicRules({
+                    removeRuleIds: removeBatch,
+                    addRules: addBatch
+                });
+                successfulAdds += addBatch.length;
+            } catch (error) {
+                console.error('BraveFox DNR host batch failed; existing unrelated rules are intact:', error);
+                return false;
+            }
+        }
+        for (let start = 0; start < obsoleteIds.length; start += batchSize) {
+            try {
+                await chrome.declarativeNetRequest.updateDynamicRules({
+                    removeRuleIds: obsoleteIds.slice(start, start + batchSize)
+                });
+            } catch (error) {
+                console.error('BraveFox DNR obsolete-host cleanup failed:', error);
+                return false;
+            }
+        }
+        console.log(`DNR hosts synchronized: ${retainedHosts.size} retained, ${successfulAdds} added/replaced, ${obsoleteIds.length} removed, ${hostsList.length} available to tab closure.`);
+        return true;
+    } catch (error) {
+        console.error('BraveFox incremental DNR host update failed:', error);
+        return false;
+    }
 };
 
 // Enhanced initialization function for force-installed extensions
@@ -1684,7 +1498,8 @@ const updateBlocklist = async () => {
 
     // Deduplicate, then remove explicitly allowlisted domains and their subdomains.
     const deduplicatedHosts = Array.from(new Set(allHosts));
-    const uniqueHostsList = deduplicatedHosts.filter(host => !isAllowlistedHostname(host) && !isCompletelyExcludedHostname(host));
+    const uniqueHostsList = Array.from(new Set(deduplicatedHosts.map(normalizeBraveFoxBlockedHost).filter(Boolean)))
+        .filter(host => !isAllowlistedHostname(host) && !isCompletelyExcludedHostname(host));
     const allowlistedHostsRemoved = deduplicatedHosts.length - uniqueHostsList.length;
     console.log(`Unique hosts list has ${uniqueHostsList.length} hosts (${allowlistedHostsRemoved} allowlisted entries removed)`);
 
@@ -1697,9 +1512,7 @@ const updateBlocklist = async () => {
     // Use new dynamic rule management system
     await manageDynamicRules(uniqueHostsList);
 
-    // manageDynamicRules intentionally clears old dynamic rules, so restore the
-    // high-priority allow rule after rebuilding the block rules.
-    await updateAllowlistRules();
+    // Incremental DNR management never removes the high-priority allow rules.
     
     // Store full list regardless of DNR limits; identical sets must not rewrite the chunks.
     await storeHostsList(uniqueHostsList);
@@ -1772,52 +1585,85 @@ const updateIncognitoBlockingRules = async () => {
     });
 };
 
+// Parse configured blockedSites as real hosts/paths/queries rather than raw href
+// substrings. A tracker domain embedded in another site's query string is NOT the
+// visited site's hostname. Intentional path-only entries remain path-specific.
+const BRAVEFOX_BLOCKED_SITE_RULES = blockedSites.map(entry => {
+    const text = String(entry || '').trim();
+    if (!text) return null;
+    if (text.startsWith('?')) {
+        try {
+            return { kind: 'query', params: [...new URLSearchParams(text.slice(1))] };
+        } catch (_) { return null; }
+    }
+    const isPathOnly = !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+/i.test(text) ||
+        /^[^/?]+\.html?(?:[/?]|$)/i.test(text);
+    try {
+        const parsed = new URL(`https://${isPathOnly ? 'bravefox.invalid/' : ''}${text.replace(/^\//, '')}`);
+        if (!isPathOnly && !normalizeBraveFoxBlockedHost(parsed.hostname)) return null;
+        return {
+            kind: isPathOnly ? 'path' : 'host',
+            host: isPathOnly ? '' : parsed.hostname.toLowerCase(),
+            path: parsed.pathname.replace(/\/{2,}/g, '/'),
+            params: [...parsed.searchParams]
+        };
+    } catch (_) { return null; }
+}).filter(Boolean);
+
+const braveFoxBlockedSiteRuleMatch = (parsed, rule) => {
+    if (rule.kind === 'query') {
+        return rule.params.every(([key, value]) => parsed.searchParams.getAll(key).includes(value));
+    }
+    if (rule.kind === 'host' && !(parsed.hostname === rule.host ||
+        parsed.hostname.endsWith(`.${rule.host}`))) return false;
+    const pathname = parsed.pathname.replace(/\/{2,}/g, '/');
+    const path = rule.path === '/' ? '/' : rule.path.replace(/\/$/, '');
+    if (path !== '/' && !(pathname === path || pathname.startsWith(`${path}/`))) return false;
+    if (rule.kind === 'path' && !path.startsWith('/')) return false;
+    return rule.params.every(([key, value]) => parsed.searchParams.getAll(key).includes(value));
+};
+
+const findBraveFoxBlockedSiteRule = parsed => {
+    for (let index = 0; index < BRAVEFOX_BLOCKED_SITE_RULES.length; index++) {
+        if (braveFoxBlockedSiteRuleMatch(parsed, BRAVEFOX_BLOCKED_SITE_RULES[index])) {
+            return blockedSites[index];
+        }
+    }
+    return '';
+};
+
 // Extract hostname from URL
 const getHostnameFromUrl = (url) => {
     try {
         const urlObj = new URL(url);
-        return urlObj.hostname;
+        return urlObj.hostname.toLowerCase().replace(/\.$/, '');
     } catch (error) {
         return null;
     }
 };
 
-// Check if URL should be blocked (for immediate tab closure)
-const isBlockedUrl = (url) => {
-    if (!url || isBraveFoxCompletelyExcludedUrl(url)) return false;
-
-    const hostname = getHostnameFromUrl(url);
-
-    // Explicit allowlist always wins over fetched hosts, generic URL checks, and TLD checks.
-    if (hostname && isAllowlistedHostname(hostname)) {
-        return false;
-    }
-    
-    // Check against regex patterns
-    if (edgeRegex.test(url) || msedgeRegex.test(url)) {
-        return true;
-    }
-    
-    // Check against blockedSites array
-    if (blockedSites.some(site => url.includes(site))) {
-        return true;
-    }
-
-    // Check against hosts list from fetched files
-    if (hostname) {
-        if (hostsListForClosure.has(hostname)) {
-            return true;
+// A single explicit URL verdict is shared by tab closure and the central bridge.
+const findBraveFoxBlockedUrlReason = url => {
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+        const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        if (isBraveFoxCompletelyExcludedUrl(parsed.href) || isAllowlistedHostname(hostname)) return null;
+        if (edgeRegex.test(parsed.href) || msedgeRegex.test(parsed.href)) {
+            return { source: 'browser-deny-regex', match: hostname };
         }
-        
-        // TLD Checking implementation
-        const lowerHostname = hostname.toLowerCase();
-        if (blockedTLDs.some(tld => lowerHostname.endsWith(tld))) {
-            return true;
-        }
-    }
-
-    return false;
+        const blockedSite = findBraveFoxBlockedSiteRule(parsed);
+        if (blockedSite) return { source: 'blockedSites', match: blockedSite };
+        const blockedHost = findBraveFoxCentralBlockedHost(hostname);
+        if (blockedHost) return { source: 'fetched-hosts', match: blockedHost };
+        const blockedTLD = blockedTLDs.find(tld => hostname.endsWith(tld));
+        if (blockedTLD) return { source: 'blockedTLDs', match: blockedTLD };
+    } catch (_) {}
+    return null;
 };
+
+// Check if URL should be blocked (for immediate tab closure)
+const isBlockedUrl = url => Boolean(findBraveFoxBlockedUrlReason(url));
 
 // === Central URL policy bridge ================================================
 // Content scripts that already filter links/results can ask the background for the
@@ -1970,13 +1816,11 @@ const classifyBraveFoxCentralUrl = async (value) => {
         return { action: 'allow', url: href, hostname, source: 'allowedSites' };
     }
 
-    const blockedHost = findBraveFoxCentralBlockedHost(hostname);
-    if (blockedHost) {
-        return { action: 'block', url: href, hostname, source: 'fetched-hosts', blockedHost };
-    }
-
-    if (isBlockedUrl(href)) {
-        return { action: 'block', url: href, hostname, source: 'background-block-policy' };
+    const blockedReason = findBraveFoxBlockedUrlReason(href);
+    if (blockedReason) {
+        return { action: 'block', url: href, hostname, source: blockedReason.source,
+            blockedHost: blockedReason.source === 'fetched-hosts' ? blockedReason.match : undefined,
+            matchedEntry: blockedReason.match };
     }
 
     return { action: 'none', url: href, hostname, source: 'none' };
@@ -3333,23 +3177,21 @@ const WRESTLING_CACHE_TIME_KEY = 'wrestling_women_urls_time';
 const WRESTLING_CACHE_LIFETIME_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 const wrestlingManualBans = [
-    '/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english',
-    '/wrestlers/nikita-naridian', '/wrestlers/riho', '/wrestlers/thekla',
-    '/wrestlers/dani-sekelsky', '/wrestlers/kelly-kelly', '/wrestlers/alba-fyre', 
-    '/roster/wwe2k26/alundra-blayze', '/wrestlers/roxxi', '/wrestlers/zelina-vega', 
-    '/wrestlers/rosita', '/wrestlers/lita', '/wrestlers/chyna', '/wrestlers/maryse', 
-    '/wrestlers/aksana', '/wrestlers/kaitlyn', '/wrestlers/layla', '/wrestlers/tamina', 
-    '/wrestlers/melina', '/wrestlers/jacqueline', '/wrestlers/odb', '/wrestlers/asya', 
-    '/wrestlers/debra', '/wrestlers/lana', '/wrestlers/sable', '/wrestlers/tori', 
-    '/wrestlers/carmella', '/wrestlers/raquel', '/wrestlers/kamille', '/wrestlers/maxine', 
-    '/wrestlers/cherry', '/wrestlers/sarita', '/wrestlers/shaniqua', '/wrestlers/francine', 
-    '/wrestlers/trinity', '/wrestlers/ivy-nile', '/wrestlers/aj-lee', '/wrestlers/mia-yim', 
-    '/wrestlers/gail-kim', '/wrestlers/eve-torres', '/wrestlers/dawn-marie', '/wrestlers/joy-giovanni', 
-    '/wrestlers/cora-jade', '/wrestlers/taya-valkyrie', '/wrestlers/brie-bella', '/wrestlers/su-yung'
+	'/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english', '/wrestlers/asya',
+	'/wrestlers/nikita-naridian', '/wrestlers/riho', '/wrestlers/thekla', '/wrestlers/dani-sekelsky', 
+	'/wrestlers/kelly-kelly', '/roster/wwe2k26/alundra-blayze', '/wrestlers/roxxi', '/wrestlers/cora-jade', 
+	'/wrestlers/zelina-vega', '/wrestlers/tori', '/wrestlers/rosita', '/wrestlers/maryse', '/wrestlers/lita', 
+	'/wrestlers/aksana', '/wrestlers/kaitlyn', '/wrestlers/layla', '/wrestlers/tamina', '/wrestlers/su-yung',
+	'/wrestlers/melina', '/wrestlers/jacqueline', '/wrestlers/odb', '/wrestlers/alba-fyre', '/wrestlers/debra', 
+	'/wrestlers/lana', '/wrestlers/raquel', '/wrestlers/kamille', '/wrestlers/maxine', '/wrestlers/cora-jade',
+	'/wrestlers/cherry', '/wrestlers/sarita', '/wrestlers/shaniqua', '/wrestlers/francine', '/wrestlers/trinity', 
+	'/wrestlers/ivy-nile', '/wrestlers/mia-yim', '/wrestlers/brie-bella', '/wrestlers/carmella', '/wrestlers/sable', 
+	'/wrestlers/joy-giovanni', '/wrestlers/gail-kim', '/wrestlers/eve-torres', '/wrestlers/dawn-marie', 
+	'/wrestlers/taya-valkyrie', 
 ];
 
 const wrestlingDoNotBroadcast = [
-    '/wrestlers/melina', '/wrestlers/melina-perez', '/wrestlers/aj-lee',
+    '/wrestlers/melina', '/wrestlers/melina-perez', '/wrestlers/aj-lee', '/wrestlers/chyna',
     '/wrestlers/aj', '/wrestlers/becky-lynch', '/wrestlers/becky', '/wrestlers/katarina'
 ];
 
