@@ -381,6 +381,7 @@ const allowedSites = new Set([
 	"sieni.us",
 	"sieni.es",
 	"fastvid.xyz",
+	"nudography.com",
 	"redgifs.com",
 ]);
 
@@ -419,6 +420,7 @@ const historyAutoClearSites = new Set([
     "chatgpt.com",
     "openai.com",
     "instagram.com/popular",
+    "nudography.com",
     "user.blocksite.co"
 ]);
 
@@ -778,7 +780,6 @@ const blockedSites = [
    "mozilla.org/fi/",
    "brave.com/",
    "brave.com",
-   "instagram.com/popular",
    "download.fi/verkko",
    "uptodown.com/windows/microsoft-edge",
    "microsoft-edge.uptodown.com",
@@ -960,11 +961,13 @@ const blockedSites = [
    "www.creativefabrica.com",
    "tiktok.com/@juliana.rasikannas",
    "reddit.com/user/JulianaRasikannas",
+   "instagram.com/popular",
    "reddit.com/r/snappijuorut",
    "reddit.com/r/snappisensuroimat0n",
    "snapchat.com/@",
    "pinterest.com",
    "snapchat.com/spotlight",
+   "instagram.com/popular",
    "instagram.com/misk33waaa",
    "instagram.com/mafiaprinsessa",
    "dashboard.g2a.com/support/conversations/view/M-VJYS-724654",
