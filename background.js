@@ -4150,3 +4150,59 @@ bootManager();
     return operation();
   });
 })();
+
+// === Archive -> Google rule source bridge (Chromium / Manifest V3) ===
+// The source of truth remains the installed scripts/google.js. This handler only
+// serves that exact bundled file to BraveFox's Archive and XCancel content scripts.
+// It does not replace the central URL-policy or wrestling-roster handlers above.
+(() => {
+    'use strict';
+
+    const MESSAGE_TYPE = 'BRAVEFOX_ARCHIVE_GET_GOOGLE_POLICY_V1';
+    const SOURCE_PATH = 'scripts/google.js';
+    const ALLOWED_REQUEST_HOSTS = new Set([
+        'web.archive.org', 'wayback.archive.org', 'archive.org',
+        'www.archive.org', 'xcancel.com', 'www.xcancel.com'
+    ]);
+    let sourcePromise = null;
+
+    function readBundledGoogleSource() {
+        if (!sourcePromise) {
+            sourcePromise = fetch(chrome.runtime.getURL(SOURCE_PATH))
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Could not read ${SOURCE_PATH} (HTTP ${response.status})`);
+                    }
+                    return response.text();
+                })
+                .catch(error => {
+                    // A transient failure must not permanently poison the source cache.
+                    sourcePromise = null;
+                    throw error;
+                });
+        }
+        return sourcePromise;
+    }
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!message || message.type !== MESSAGE_TYPE) return false;
+
+        let senderHost = '';
+        try {
+            senderHost = new URL(sender?.url || sender?.tab?.url || '').hostname.toLowerCase();
+        } catch (e) {}
+        if (!ALLOWED_REQUEST_HOSTS.has(senderHost)) {
+            sendResponse({ ok: false, error: 'Archive policy request from unsupported origin' });
+            return false;
+        }
+
+        readBundledGoogleSource()
+            .then(source => sendResponse({ ok: true, source }))
+            .catch(error => {
+                console.warn('[BraveFox Archive] Cannot load Google policy source:', error);
+                sendResponse({ ok: false, error: String(error?.message || error) });
+            });
+        // Keep the MV3 message channel open until the bundled source is read.
+        return true;
+    });
+})();
