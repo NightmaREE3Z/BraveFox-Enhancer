@@ -1,3 +1,166 @@
+// === BraveFox Web Store-only rule bridge =====================================
+// Reads only the dedicated editable ID/regex arrays in scripts/google.js.
+// This does NOT import Google Search's nuclear, soft-result or redirect lists.
+// Extension content scripts cannot reliably execute on Chrome Web Store itself.
+const BRAVEFOX_WEBSTORE_SOURCE_PATH = 'scripts/google.js';
+let braveFoxWebStoreRules = {
+    extensionIds: new Set(), searchRegexes: []
+};
+
+function braveFoxParseWebStoreRulesFromGoogle(source) {
+    const start = source.indexOf('// BRAVEFOX_WEBSTORE_RULES_BEGIN');
+    const end = source.indexOf('// BRAVEFOX_WEBSTORE_RULES_END', start + 1);
+    if (start < 0 || end <= start) throw new Error('Web Store rule block is missing in scripts/google.js');
+    const block = source.slice(start, end);
+
+    function readArray(variable) {
+        const match = new RegExp('\\bconst\\s+' + variable + '\\s*=\\s*\\[([\\s\\S]*?)\\];').exec(block);
+        if (!match) throw new Error('Missing Web Store-only array: ' + variable);
+        return match[1].split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('//'));
+    }
+
+    const ids = new Set();
+    for (const line of readArray('webStoreBlockedExtensionIds')) {
+        const match = /^['"]([a-p]{32})['"]\s*,?\s*(?:\/\/.*)?$/i.exec(line);
+        if (!match) throw new Error('Invalid Web Store extension ID line: ' + line);
+        ids.add(match[1].toLowerCase());
+    }
+
+    function readRegexes(name) {
+        // Only native regex literals, with optional comma-separated entries on
+        // each line. Comments divide regular/boundary rules for easy editing.
+        // Parse characters rather than eval'ing scripts/google.js in background.
+        const regexes = [];
+        for (const line of readArray(name)) {
+            let pos = 0;
+            while (pos < line.length) {
+                while (pos < line.length && /[\s,]/.test(line[pos])) pos++;
+                if (pos >= line.length || line.startsWith('//', pos)) break;
+                if (line[pos] !== '/') throw new Error('Expected Web Store regex literal: ' + line);
+                const start = ++pos;
+                let escaped = false;
+                let inClass = false;
+                for (; pos < line.length; pos++) {
+                    const c = line[pos];
+                    if (escaped) { escaped = false; continue; }
+                    if (c === '\\') { escaped = true; continue; }
+                    if (c === '[') { inClass = true; continue; }
+                    if (c === ']') { inClass = false; continue; }
+                    if (c === '/' && !inClass) break;
+                }
+                if (pos >= line.length) throw new Error('Unterminated Web Store regex literal: ' + line);
+                const body = line.slice(start, pos++);
+                const flagStart = pos;
+                while (pos < line.length && /[a-z]/i.test(line[pos])) pos++;
+                const flags = line.slice(flagStart, pos);
+                if (/[gy]/i.test(flags)) throw new Error('Stateful Web Store flags not supported: ' + line);
+                regexes.push(new RegExp(body, flags));
+                while (pos < line.length && /\s/.test(line[pos])) pos++;
+                if (pos < line.length && line.startsWith('//', pos)) break;
+                if (pos < line.length && line[pos] !== ',') throw new Error('Missing regex separator: ' + line);
+                if (pos < line.length) pos++;
+            }
+        }
+        return regexes;
+    }
+
+    return {
+        extensionIds: ids,
+        searchRegexes: readRegexes('webStoreSearchRegexes')
+    };
+}
+
+function braveFoxIsChromeWebStoreUrl(inputUrl) {
+    try {
+        const parsed = new URL(String(inputUrl || ''));
+        return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+            parsed.hostname.toLowerCase().replace(/\.$/, '') === 'chromewebstore.google.com';
+    } catch (_) { return false; }
+}
+
+function braveFoxWebStoreDecodeSearch(raw) {
+    let value = String(raw || '').replace(/\+/g, ' ');
+    // Decode once for ordinary percent-encoding, once more for double-encoded URLs.
+    for (let n = 0; n < 2; n++) {
+        try {
+            const decoded = decodeURIComponent(value);
+            if (decoded === value) break;
+            value = decoded;
+        } catch (_) { break; }
+    }
+    return value.slice(0, 4096).trim();
+}
+
+function braveFoxWebStoreBlockedReason(inputUrl, tabTitle = '') {
+    if (!braveFoxIsChromeWebStoreUrl(inputUrl)) return null;
+    try {
+        const parsed = new URL(inputUrl);
+        const path = parsed.pathname.replace(/\/{2,}/g, '/');
+        // IDs must be complete final segments of /detail/slug/ID or /detail/ID.
+        const detail = /^\/detail\/(?:[^/]+\/)*([a-p]{32})\/?$/i.exec(path);
+        if (detail && braveFoxWebStoreRules.extensionIds.has(detail[1].toLowerCase())) {
+            return { source: 'webstore-extension-id', match: detail[1].toLowerCase() };
+        }
+        // Chrome forbids content-script inspection of its Web Store DOM. The
+        // background Tabs API exposes the page's document.title instead, which
+        // normally mirrors the listing <h1>. Check that only on detail pages,
+        // using the same dedicated Web Store regexes as submitted searches.
+        if (detail && typeof tabTitle === 'string' && tabTitle.trim()) {
+            const title = tabTitle.replace(/\s+/g, ' ').trim().slice(0, 4096);
+            for (const rx of braveFoxWebStoreRules.searchRegexes) {
+                rx.lastIndex = 0;
+                if (rx.test(title)) return { source: 'webstore-detail-title-regex', match: rx.source };
+            }
+        }
+        if (!/^\/search(?:\/|$)/i.test(path)) return null;
+        const searchPath = path.replace(/^\/search\/?/i, '');
+        const query = braveFoxWebStoreDecodeSearch(searchPath ||
+            parsed.searchParams.get('q') || parsed.searchParams.get('query') || '');
+        if (!query) return null;
+        for (const rx of braveFoxWebStoreRules.searchRegexes) {
+            rx.lastIndex = 0;
+            if (rx.test(query)) return { source: 'webstore-search-regex', match: rx.source };
+        }
+    } catch (_) {}
+    return null;
+}
+
+const braveFoxWebStorePolicyReady = fetch(chrome.runtime.getURL(BRAVEFOX_WEBSTORE_SOURCE_PATH))
+    .then(response => {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.text();
+    })
+    .then(source => {
+        braveFoxWebStoreRules = braveFoxParseWebStoreRulesFromGoogle(source);
+        return true;
+    })
+    .catch(error => {
+        console.warn('[BraveFox Web Store] Cannot load isolated rules:', error);
+        return false;
+    });
+
+// Recheck a live tab after Web Store rules have loaded. Titles can arrive well
+// after the URL (including during Web Store SPA navigation). A stale tab title
+// should never be used against a fresh navigation during its loading state.
+async function braveFoxCloseWebStoreTitleMatch(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0 || closedTabs.has(tabId)) return false;
+    if (!await braveFoxWebStorePolicyReady || closedTabs.has(tabId)) return false;
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { return false; }
+    const url = tab?.url || '';
+    if (!url || !tab?.title || !braveFoxIsChromeWebStoreUrl(url) ||
+        tab.status !== 'complete' || closedTabs.has(tabId)) return false;
+    const reason = braveFoxWebStoreBlockedReason(url, tab.title);
+    if (reason?.source !== 'webstore-detail-title-regex') return false;
+    closedTabs.add(tabId);
+    console.log('[BraveFox Web Store] Closing listing title match:', reason.match);
+    const closed = await closeBlockedTabImmediately(url, tabId);
+    if (!closed) closedTabs.delete(tabId);
+    return Boolean(closed);
+}
+
+// === END BraveFox Web Store-only rule bridge ==================================
+
 // BraveFox Enhancer core exclusions. These remain local to Enhancer now that
 // Focus-list management now lives in the separate standalone extension.
 const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
@@ -855,6 +1018,24 @@ const blockedSites = [
    "m365.cloud.microsoft",
    "m365.cloud",
    "m365.microsoft",
+   "chromewebstore.google.com/search/ie%20tab",
+   "chromewebstore.google.com/search/%20browser",
+   "chromewebstore.google.com/search/browser%20",
+   "chromewebstore.google.com/search/browser",
+   "chromewebstore.google.com/search/Firefox",
+   "chromewebstore.google.com/search/tiktok",
+   "chromewebstore.google.com/search/tik%20tok",
+   "chromewebstore.google.com/detail/hehijbfgiekmjfkfjpbkbammjbdenadd",
+   "chromewebstore.google.com/detail/moffahdcgnjnglbepimcggkjacdmpojc",
+   "chromewebstore.google.com/detail/dkhhkjpckbmkfdicijemmdaieaagkcco",
+   "chromewebstore.google.com/detail/looohpideggedchhpphemdmppnmdkgfd",
+   "chromewebstore.google.com/detail/eainiiiddlnijgnbngaoflannicnhaoj",
+   "chromewebstore.google.com/detail/jlhpdjlheiegpaipcgkbampjpcdebfeo",
+   "chromewebstore.google.com/detail/cbjepagibeiigblminajoejhcbifmpag",
+   "chromewebstore.google.com/detail/ppfgedmljembchpojncdbkiflelbiofj",
+   "chromewebstore.google.com/detail/njbjhijidkjaiakmnbdjmolgffoankbc",
+   "chromewebstore.google.com/detail/aajbiffdnglkofijhbnhklmhgllaefnp",
+   "chromewebstore.google.com/detail/aomkpefnllinimbhddlfhelelngakbbn",
    "?origindomain=microsoft365",
    "m365.cloud.microsoft/?origindomain=microsoft365",
    "waterfox.en.uptodown.com/windows",
@@ -1651,6 +1832,8 @@ const findBraveFoxBlockedUrlReason = url => {
         const parsed = new URL(url);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
         const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        const webStoreHit = braveFoxWebStoreBlockedReason(parsed.href);
+        if (webStoreHit) return webStoreHit;
         if (isBraveFoxCompletelyExcludedUrl(parsed.href) || isAllowlistedHostname(hostname)) return null;
         if (edgeRegex.test(parsed.href) || msedgeRegex.test(parsed.href)) {
             return { source: 'browser-deny-regex', match: hostname };
@@ -2151,6 +2334,13 @@ const registerEventListeners = () => {
                         scheduleAutoClearHistoryUrl(changeInfo.url, 'tabs.onUpdated');
                     }
 
+                    // Web Store detail names cannot be read via a Chrome content
+                    // script; tabs.onUpdated exposes the document title instead.
+                    if (braveFoxIsChromeWebStoreUrl(braveFoxCandidateUrl) &&
+                        (typeof changeInfo?.title === 'string' || changeInfo?.status === 'complete')) {
+                        void braveFoxCloseWebStoreTitleMatch(tabId);
+                    }
+
                     if (isBraveFoxCompletelyExcludedUrl(braveFoxCandidateUrl)) return;
                     // Redirect when a tab navigates to a protected system page
                     const urlIsProtected = changeInfo.url ? isProtectedSystemPageUrl(changeInfo.url) : (tab && tab.url && isProtectedSystemPageUrl(tab.url));
@@ -2238,7 +2428,15 @@ const registerEventListeners = () => {
         // ChatGPT is a long-lived SPA. pushState/replaceState navigations land here even when
         // tabs.onUpdated/history.onVisited do not behave like a traditional page navigation.
         if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
-            const onHistoryStateUpdatedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onHistoryStateUpdated');
+            const onHistoryStateUpdatedHandler = (details) => {
+                processAutoClearNavigation(details, 'webNavigation.onHistoryStateUpdated');
+                // The Web Store uses History API search navigation (no new document).
+                if (details?.frameId !== 0 || !Number.isInteger(details.tabId) ||
+                    details.tabId < 0 || !braveFoxWebStoreBlockedReason(details.url) ||
+                    closedTabs.has(details.tabId)) return;
+                closedTabs.add(details.tabId);
+                void closeBlockedTabImmediately(details.url, details.tabId);
+            };
             chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedHandler);
             resourceTracker.addEventCleanup(() => {
                 chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistoryStateUpdatedHandler);
@@ -4205,4 +4403,29 @@ bootManager();
         // Keep the MV3 message channel open until the bundled source is read.
         return true;
     });
+})();
+
+(() => {
+// After reading google.js, catch Web Store pages opened during MV3 cold-start.
+void braveFoxWebStorePolicyReady.then(ok => {
+    if (!ok) return;
+    return chrome.tabs.query({}).then(tabs => {
+        for (const tab of tabs) {
+            const url = tab?.url || tab?.pendingUrl || '';
+            if (!Number.isInteger(tab?.id) || closedTabs.has(tab.id)) continue;
+            if (braveFoxWebStoreBlockedReason(url)) {
+                closedTabs.add(tab.id);
+                void closeBlockedTabImmediately(url, tab.id);
+            } else if (braveFoxIsChromeWebStoreUrl(url) && tab.status === 'complete') {
+                // Startup scan also covers already-open detail pages by title.
+                void braveFoxCloseWebStoreTitleMatch(tab.id);
+            }
+        }
+    });
+}).catch(error => console.warn('[BraveFox Web Store] Startup scan failed:', error));
+
+// Revisit a completed Web Store listing when returning to an existing tab.
+chrome.tabs?.onActivated?.addListener(info => {
+    if (Number.isInteger(info?.tabId)) void braveFoxCloseWebStoreTitleMatch(info.tabId);
+});
 })();
