@@ -139,26 +139,6 @@ const braveFoxWebStorePolicyReady = fetch(chrome.runtime.getURL(BRAVEFOX_WEBSTOR
         return false;
     });
 
-// Recheck a live tab after Web Store rules have loaded. Titles can arrive well
-// after the URL (including during Web Store SPA navigation). A stale tab title
-// should never be used against a fresh navigation during its loading state.
-async function braveFoxCloseWebStoreTitleMatch(tabId) {
-    if (!Number.isInteger(tabId) || tabId < 0 || closedTabs.has(tabId)) return false;
-    if (!await braveFoxWebStorePolicyReady || closedTabs.has(tabId)) return false;
-    let tab;
-    try { tab = await chrome.tabs.get(tabId); } catch (_) { return false; }
-    const url = tab?.url || '';
-    if (!url || !tab?.title || !braveFoxIsChromeWebStoreUrl(url) ||
-        tab.status !== 'complete' || closedTabs.has(tabId)) return false;
-    const reason = braveFoxWebStoreBlockedReason(url, tab.title);
-    if (reason?.source !== 'webstore-detail-title-regex') return false;
-    closedTabs.add(tabId);
-    console.log('[BraveFox Web Store] Closing listing title match:', reason.match);
-    const closed = await closeBlockedTabImmediately(url, tabId);
-    if (!closed) closedTabs.delete(tabId);
-    return Boolean(closed);
-}
-
 // === END BraveFox Web Store-only rule bridge ==================================
 
 // BraveFox Enhancer core exclusions. These remain local to Enhancer now that
@@ -1018,6 +998,7 @@ const blockedSites = [
    "m365.cloud.microsoft",
    "m365.cloud",
    "m365.microsoft",
+   "adblock-for-y.com",
    "chromewebstore.google.com/search/ie%20tab",
    "chromewebstore.google.com/search/%20browser",
    "chromewebstore.google.com/search/browser%20",
@@ -3676,6 +3657,51 @@ const bootManager = async () => {
     }
 };
 
+// Recheck a live tab after Web Store rules have loaded. Titles can arrive well
+// after the URL (including during Web Store SPA navigation). A stale tab title
+// should never be used against a fresh navigation during its loading state.
+async function braveFoxCloseWebStoreTitleMatch(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0 || closedTabs.has(tabId)) return false;
+    if (!await braveFoxWebStorePolicyReady || closedTabs.has(tabId)) return false;
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { return false; }
+    const url = tab?.url || '';
+    if (!url || !tab?.title || !braveFoxIsChromeWebStoreUrl(url) ||
+        tab.status !== 'complete' || closedTabs.has(tabId)) return false;
+    const reason = braveFoxWebStoreBlockedReason(url, tab.title);
+    if (reason?.source !== 'webstore-detail-title-regex') return false;
+    closedTabs.add(tabId);
+    console.log('[BraveFox Web Store] Closing listing title match:', reason.match);
+    const closed = await closeBlockedTabImmediately(url, tabId);
+    if (!closed) closedTabs.delete(tabId);
+    return Boolean(closed);
+}
+
+(() => {
+// After reading google.js, catch Web Store pages opened during MV3 cold-start.
+void braveFoxWebStorePolicyReady.then(ok => {
+    if (!ok) return;
+    return chrome.tabs.query({}).then(tabs => {
+        for (const tab of tabs) {
+            const url = tab?.url || tab?.pendingUrl || '';
+            if (!Number.isInteger(tab?.id) || closedTabs.has(tab.id)) continue;
+            if (braveFoxWebStoreBlockedReason(url)) {
+                closedTabs.add(tab.id);
+                void closeBlockedTabImmediately(url, tab.id);
+            } else if (braveFoxIsChromeWebStoreUrl(url) && tab.status === 'complete') {
+                // Startup scan also covers already-open detail pages by title.
+                void braveFoxCloseWebStoreTitleMatch(tab.id);
+            }
+        }
+    });
+}).catch(error => console.warn('[BraveFox Web Store] Startup scan failed:', error));
+
+// Revisit a completed Web Store listing when returning to an existing tab.
+chrome.tabs?.onActivated?.addListener(info => {
+    if (Number.isInteger(info?.tabId)) void braveFoxCloseWebStoreTitleMatch(info.tabId);
+});
+})();
+
 bootManager();
 })();
 
@@ -4403,29 +4429,4 @@ bootManager();
         // Keep the MV3 message channel open until the bundled source is read.
         return true;
     });
-})();
-
-(() => {
-// After reading google.js, catch Web Store pages opened during MV3 cold-start.
-void braveFoxWebStorePolicyReady.then(ok => {
-    if (!ok) return;
-    return chrome.tabs.query({}).then(tabs => {
-        for (const tab of tabs) {
-            const url = tab?.url || tab?.pendingUrl || '';
-            if (!Number.isInteger(tab?.id) || closedTabs.has(tab.id)) continue;
-            if (braveFoxWebStoreBlockedReason(url)) {
-                closedTabs.add(tab.id);
-                void closeBlockedTabImmediately(url, tab.id);
-            } else if (braveFoxIsChromeWebStoreUrl(url) && tab.status === 'complete') {
-                // Startup scan also covers already-open detail pages by title.
-                void braveFoxCloseWebStoreTitleMatch(tab.id);
-            }
-        }
-    });
-}).catch(error => console.warn('[BraveFox Web Store] Startup scan failed:', error));
-
-// Revisit a completed Web Store listing when returning to an existing tab.
-chrome.tabs?.onActivated?.addListener(info => {
-    if (Number.isInteger(info?.tabId)) void braveFoxCloseWebStoreTitleMatch(info.tabId);
-});
 })();
