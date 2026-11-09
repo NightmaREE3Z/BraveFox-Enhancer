@@ -81,7 +81,6 @@
             'firefox.com/*',
             'mozilla.org/*',
             'mega.nz*',
-            'wiseoldman.net/*',
             'microsoft.com/fi-fi/edge/launch*',
             '*microsoft.com/en-us/edge/launch*',
             'github.com/NightmaREE3Z*',
