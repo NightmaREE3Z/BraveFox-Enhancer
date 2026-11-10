@@ -442,8 +442,29 @@
             return;
         }
 
-        chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, () => {
-            chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' });
+        // Only an acknowledged password approval may navigate back to a
+        // protected browser page. Never mistake a dropped MV3 message for success.
+        submit.disabled = true;
+        input.disabled = true;
+        error.textContent = '';
+        chrome.runtime.sendMessage({ type: 'BRAVEFOX_EXT_UNLOCK' }, approval => {
+          const unlockError = chrome.runtime.lastError;
+          if (unlockError || !approval?.ok) {
+            submit.disabled = false;
+            input.disabled = false;
+            error.textContent = unlockError?.message || approval?.error || 'System unlock failed.';
+            input.focus();
+            return;
+          }
+          chrome.runtime.sendMessage({ type: 'BRAVEFOX_GO_TO_EXTENSIONS' }, returned => {
+            const navigationError = chrome.runtime.lastError;
+            if (navigationError || !returned?.ok) {
+              submit.disabled = false;
+              input.disabled = false;
+              error.textContent = navigationError?.message || returned?.error || 'Could not return to system page.';
+              input.focus();
+            }
+          });
         });
       } else {
         error.textContent = 'Incorrect password. Try again.';

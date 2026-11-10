@@ -2212,6 +2212,133 @@ const UNLOCK_BYPASS_TABS = new Map();
 // NEW: Track the intercepted URL so we can seamlessly bounce them back after unlock
 const ORIGINAL_URLS = new Map(); 
 
+// v29.8.2: a successful system-page unlock authorizes the current browser
+// session for exactly five minutes, not merely the tab containing the prompt.
+// Store only a bounded expiry (never a password) so an extension update / MV3
+// worker restart cannot turn navigation to an extension detail page into a new gate.
+// The incognito window stays memory-only and does not inherit regular grants.
+const BRAVEFOX_SYSTEM_AUTH_LEASE_KEY = 'bravefoxSystemAuthLease_v1';
+const BRAVEFOX_SYSTEM_PENDING_KEY = 'bravefoxSystemAuthPending_v1';
+const BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY = 'bravefoxSystemIncognitoAuthLease_v1';
+const BRAVEFOX_SYSTEM_PENDING_TTL_MS = 2 * 60 * 1000;
+let bravefoxSystemLeaseExpiresAt = 0;
+let bravefoxSystemLeaseHydration = null;
+let bravefoxSystemIncognitoExpiresAt = 0;
+let bravefoxSystemAuthStartupReset = false;
+const bravefoxSystemRedirectPending = new Set();
+
+function bravefoxValidSystemLease(lease) {
+    const now = Date.now();
+    const issued = Number(lease?.issuedAt);
+    const expiry = Number(lease?.expiresAt);
+    return Number.isFinite(issued) && Number.isFinite(expiry) &&
+        issued > 0 && issued <= now && expiry > now &&
+        expiry <= issued + BYPASS_TTL_MS && issued >= now - BYPASS_TTL_MS;
+}
+
+async function bravefoxReadSystemLease() {
+    if (bravefoxSystemAuthStartupReset) return 0;
+    if (bravefoxSystemLeaseExpiresAt > Date.now()) return bravefoxSystemLeaseExpiresAt;
+    if (!bravefoxSystemLeaseHydration) {
+        bravefoxSystemLeaseHydration = (async () => {
+            try {
+                const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_AUTH_LEASE_KEY);
+                const lease = stored?.[BRAVEFOX_SYSTEM_AUTH_LEASE_KEY];
+                if (bravefoxValidSystemLease(lease) && !bravefoxSystemAuthStartupReset) {
+                    bravefoxSystemLeaseExpiresAt = lease.expiresAt;
+                    return lease.expiresAt;
+                }
+                if (lease) await chrome.storage.local.remove(BRAVEFOX_SYSTEM_AUTH_LEASE_KEY);
+            } catch (error) {
+                console.warn('BraveFox: could not restore system unlock:', error?.message || error);
+            }
+            return 0;
+        })().finally(() => { bravefoxSystemLeaseHydration = null; });
+    }
+    return bravefoxSystemLeaseHydration;
+}
+
+async function bravefoxHasSystemPageGrant(tabId, tab = null) {
+    if (bravefoxSystemAuthStartupReset) return false;
+    if (isBypassed(tabId)) return true;
+    try {
+        const current = tab || await chrome.tabs.get(tabId);
+        if (current?.incognito) {
+            if (bravefoxSystemIncognitoExpiresAt <= Date.now() && chrome.storage?.session) {
+                const stored = await chrome.storage.session.get(BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY);
+                const lease = stored?.[BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY];
+                if (bravefoxValidSystemLease(lease)) bravefoxSystemIncognitoExpiresAt = lease.expiresAt;
+            }
+            if (bravefoxSystemIncognitoExpiresAt > Date.now()) {
+                UNLOCK_BYPASS_TABS.set(tabId, bravefoxSystemIncognitoExpiresAt);
+                return true;
+            }
+            return false;
+        }
+        const expiry = await bravefoxReadSystemLease();
+        if (expiry > Date.now()) {
+            UNLOCK_BYPASS_TABS.set(tabId, expiry);
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+async function bravefoxRememberSystemReturn(tabId, url) {
+    ORIGINAL_URLS.set(tabId, url);
+    try {
+        const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_PENDING_KEY);
+        const entries = stored?.[BRAVEFOX_SYSTEM_PENDING_KEY] || {};
+        const now = Date.now();
+        for (const [key, record] of Object.entries(entries)) {
+            if (Number(record?.expiresAt) <= now) delete entries[key];
+        }
+        entries[String(tabId)] = { url, expiresAt: now + BRAVEFOX_SYSTEM_PENDING_TTL_MS };
+        await chrome.storage.local.set({ [BRAVEFOX_SYSTEM_PENDING_KEY]: entries });
+    } catch (_) {} // The in-memory return URL still works without persistence.
+}
+
+async function bravefoxTakeSystemReturn(tabId) {
+    let url = ORIGINAL_URLS.get(tabId) || '';
+    ORIGINAL_URLS.delete(tabId);
+    try {
+        const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_PENDING_KEY);
+        const entries = stored?.[BRAVEFOX_SYSTEM_PENDING_KEY] || {};
+        const record = entries[String(tabId)];
+        delete entries[String(tabId)];
+        await chrome.storage.local.set({ [BRAVEFOX_SYSTEM_PENDING_KEY]: entries });
+        if (!url && Number(record?.expiresAt) > Date.now()) url = record.url || '';
+    } catch (_) {}
+    return isProtectedSystemPageUrl(url) ? url : 'chrome://extensions/';
+}
+
+async function bravefoxClearSystemLeaseOnBrowserStartup() {
+    bravefoxSystemAuthStartupReset = true;
+    bravefoxSystemLeaseExpiresAt = 0;
+    bravefoxSystemIncognitoExpiresAt = 0;
+    UNLOCK_BYPASS_TABS.clear();
+    try {
+        await chrome.storage.local.remove([
+            BRAVEFOX_SYSTEM_AUTH_LEASE_KEY, BRAVEFOX_SYSTEM_PENDING_KEY,
+            BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY
+        ]);
+        await chrome.storage.session?.remove(BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY);
+    } catch (_) {}
+    bravefoxSystemAuthStartupReset = false;
+    await scanAndRedirectProtectedTabs();
+}
+
+function bravefoxIsSystemPasswordSender(sender) {
+    try {
+        if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) ||
+            (sender.frameId !== undefined && sender.frameId !== 0)) return false;
+        const url = new URL(String(sender.url || sender.tab.url || ''));
+        return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id &&
+            url.pathname === '/html/password-protected.html' &&
+            !url.searchParams.has('target') && !url.searchParams.has('request');
+    } catch (_) { return false; }
+}
+
 function isBypassed(tabId) {
   if (tabId == null) return false;
   const exp = UNLOCK_BYPASS_TABS.get(tabId);
@@ -2228,12 +2355,12 @@ function grantBypass(tabId) {
     const duration = (EXT_BYPASS_STRATEGY === 'ttl') ? BYPASS_TTL_MS : BYPASS_WINDOW_MS;
     const expiresAt = Date.now() + duration;
     UNLOCK_BYPASS_TABS.set(tabId, expiresAt);
-    // Safety cleanup
+    // A prior timer must never remove a subsequently renewed unlock.
     const cleanupId = setTimeout(() => {
-      UNLOCK_BYPASS_TABS.delete(tabId);
+      if (UNLOCK_BYPASS_TABS.get(tabId) === expiresAt) UNLOCK_BYPASS_TABS.delete(tabId);
     }, duration + 1000);
     resourceTracker.addTimeout(cleanupId);
-    console.log(`🔓 Granted ${EXT_BYPASS_STRATEGY} bypass for tab ${tabId} (${duration}ms)`);
+    return expiresAt;
   } catch (e) {
     console.warn('Failed to grant bypass:', e?.message || e);
   }
@@ -2272,19 +2399,27 @@ function getProtectedPageUrl() {
 
 // Attempt to redirect a tab to the protected internal page and remember where they wanted to go
 async function redirectToProtectedSystemPage(tabId, originalUrl) {
-    const target = getProtectedPageUrl();
+    if (!Number.isInteger(tabId) || !isProtectedSystemPageUrl(originalUrl) ||
+        bravefoxSystemRedirectPending.has(tabId)) return false;
+    bravefoxSystemRedirectPending.add(tabId);
     try {
-        // Record the URL so we can send them back there if they authenticate
-        if (originalUrl) {
-            ORIGINAL_URLS.set(tabId, originalUrl);
-        }
-        
-        await chrome.tabs.update(tabId, { url: target });
-        console.log(`🔐 Redirected tab ${tabId} to protected page: ${target}`);
+        // Grant restoration is asynchronous on the first event after an update.
+        // Recheck before redirecting so a valid lease never produces a flash.
+        const tab = await chrome.tabs.get(tabId);
+        if (await bravefoxHasSystemPageGrant(tabId, tab)) return false;
+        const current = await chrome.tabs.get(tabId);
+        const activeUrl = current?.pendingUrl || current?.url || '';
+        if (!isProtectedSystemPageUrl(activeUrl)) return false;
+        // Keep the latest details-page URL, not an older onUpdated event URL.
+        await bravefoxRememberSystemReturn(tabId, activeUrl);
+        if (await bravefoxHasSystemPageGrant(tabId, current)) return false;
+        await chrome.tabs.update(tabId, { url: getProtectedPageUrl() });
         return true;
     } catch (e) {
-        console.warn(`⚠️ Failed to redirect tab ${tabId} to protected page:`, e?.message || e);
+        console.warn('BraveFox: system page gate failed:', e?.message || e);
         return false;
+    } finally {
+        bravefoxSystemRedirectPending.delete(tabId);
     }
 }
 
@@ -2293,7 +2428,8 @@ async function scanAndRedirectProtectedTabs() {
     try {
         const tabs = await chrome.tabs.query({});
         for (const t of tabs) {
-            if (t && t.id != null && t.url && isProtectedSystemPageUrl(t.url) && !isBypassed(t.id)) {
+            if (t && t.id != null && t.url && isProtectedSystemPageUrl(t.url) &&
+                !(await bravefoxHasSystemPageGrant(t.id, t))) {
                 await redirectToProtectedSystemPage(t.id, t.url);
             }
         }
@@ -2751,48 +2887,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || typeof message !== 'object') return;
 
     if (message.type === 'BRAVEFOX_EXT_UNLOCK') {
-      const tabId = sender?.tab?.id;
-      if (tabId != null) {
-        // Grant bypass according to strategy: 'ttl' ties to 5-min window, 'window' is short
-        grantBypass(tabId);
-        sendResponse?.({ ok: true, strategy: EXT_BYPASS_STRATEGY, ttlMs: (EXT_BYPASS_STRATEGY === 'ttl' ? BYPASS_TTL_MS : BYPASS_WINDOW_MS) });
-      } else {
-        sendResponse?.({ ok: false, error: 'No sender tab id' });
+      if (!bravefoxIsSystemPasswordSender(sender)) {
+        sendResponse?.({ ok: false, error: 'Unauthorized system unlock sender.' });
+        return true;
       }
+      (async () => {
+        try {
+          const tabId = sender.tab.id;
+          const expiresAt = grantBypass(tabId);
+          if (!Number.isFinite(expiresAt)) throw new Error('Could not grant system unlock.');
+          if (sender.tab.incognito) {
+            bravefoxSystemIncognitoExpiresAt = expiresAt;
+            // Split incognito can survive an MV3 worker sleep, but never carry
+            // its unlock into the regular profile or a new browser session.
+            try {
+              await chrome.storage.session?.set({
+                [BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY]: { issuedAt: Date.now(), expiresAt }
+              });
+            } catch (_) {}
+          } else {
+            const issuedAt = Date.now();
+            bravefoxSystemLeaseExpiresAt = expiresAt;
+            await chrome.storage.local.set({
+              [BRAVEFOX_SYSTEM_AUTH_LEASE_KEY]: { issuedAt, expiresAt }
+            });
+          }
+          sendResponse?.({ ok: true, expiresAt, ttlMs: BYPASS_TTL_MS });
+        } catch (error) {
+          UNLOCK_BYPASS_TABS.delete(sender.tab.id);
+          bravefoxSystemLeaseExpiresAt = 0;
+          sendResponse?.({ ok: false, error: error?.message || 'Could not save system unlock.' });
+        }
+      })();
       return true;
     }
 
     if (message.type === 'BRAVEFOX_GO_TO_EXTENSIONS') {
-      const tabId = sender?.tab?.id;
-      
-      // SMART ROUTING: Go to the originally blocked URL if we have one, otherwise default to extensions page.
-      const targetUrl = (tabId != null && ORIGINAL_URLS.has(tabId)) ? ORIGINAL_URLS.get(tabId) : 'chrome://extensions/';
-      if (tabId != null) ORIGINAL_URLS.delete(tabId); // Cleanup
-      
+      if (!bravefoxIsSystemPasswordSender(sender)) {
+        sendResponse?.({ ok: false, error: 'Unauthorized system page navigation.' });
+        return true;
+      }
       (async () => {
         try {
-          if (tabId != null) {
-            await chrome.tabs.update(tabId, { url: targetUrl });
-            sendResponse?.({ ok: true });
-          } else {
-            await chrome.tabs.create({ url: targetUrl, active: true });
-            sendResponse?.({ ok: true, openedNew: true });
+          const tabId = sender.tab.id;
+          if (!(await bravefoxHasSystemPageGrant(tabId, sender.tab))) {
+            sendResponse?.({ ok: false, error: 'System page unlock expired.' });
+            return;
           }
-        } catch (e1) {
-          // Fallback: try opening a new tab if update fails
-          try {
-            await chrome.tabs.create({ url: targetUrl, active: true });
-            // Optional: close original tab to avoid confusion
-            if (tabId != null) {
-              try { await chrome.tabs.remove(tabId); } catch {}
-            }
-            sendResponse?.({ ok: true, openedNew: true });
-          } catch (e2) {
-            sendResponse?.({ ok: false, error: e2?.message || String(e2) });
-          }
+          const targetUrl = await bravefoxTakeSystemReturn(tabId);
+          await chrome.tabs.update(tabId, { url: targetUrl });
+          sendResponse?.({ ok: true });
+        } catch (error) {
+          sendResponse?.({ ok: false, error: error?.message || 'Could not open system page.' });
         }
       })();
-      return true; // keep the channel open for async response
+      return true;
     }
   } catch (e) {
     try { sendResponse?.({ ok: false, error: e?.message || String(e) }); } catch {}
@@ -2806,6 +2955,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // The background owns the tab navigation to the extension page and only returns
 // the tab after that top-level page approves the request.
 const BRAVEFOX_WEB_AUTH_STATE_KEY = 'bravefoxWebAuthState_v1';
+const BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY = 'bravefoxWebApprovedPageGrants_v1';
 const BRAVEFOX_WEB_AUTH_REQUEST_TTL_MS = 2 * 60 * 1000;
 const BRAVEFOX_WEB_PAGE_GRANT_TTL_MS = 5 * 60 * 1000;
 const BRAVEFOX_WEB_ACTION_GRANT_TTL_MS = 60 * 1000;
@@ -2920,22 +3070,51 @@ function bravefoxWebActionGrantKey(tabId, rawUrl, actionKey) {
     return Number.isInteger(tabId) && host && action ? `${tabId}:${host}:${action}` : '';
 }
 
-async function bravefoxLoadWebAuthState() {
-    try {
-        if (!chrome.storage?.session) {
-            return { requests: {}, pageGrants: {}, actionGrants: {} };
+// Only already-approved, reusable web PAGE grants can survive an extension
+// upgrade. Never mirror pending requests, action grants, one-time grants, or
+// any ChatGPT sensitive-route grants to durable storage.
+function bravefoxWebApprovedReusableGrants(grants) {
+    const allowed = {};
+    const now = Date.now();
+    const sessionScopes = new Set(Object.values(BRAVEFOX_WEB_SESSION_PAGE_SCOPES));
+    for (const [key, grant] of Object.entries(grants || {})) {
+        if (!grant || typeof grant !== 'object') continue;
+        if (grant.mode === 'session' && sessionScopes.has(grant.scope) &&
+            key === `session:${grant.scope}` &&
+            Number(grant.grantedAt) > 0 && Number(grant.grantedAt) <= now) {
+            allowed[key] = grant;
+        } else if (grant.mode === 'timed' && /^\d+:[a-z0-9.-]+$/.test(key) &&
+            Number(grant.grantedAt) > 0 && Number(grant.grantedAt) <= now &&
+            Number(grant.expiresAt) > now &&
+            Number(grant.expiresAt) <= Number(grant.grantedAt) + BRAVEFOX_WEB_PAGE_GRANT_TTL_MS) {
+            allowed[key] = grant;
         }
+    }
+    return allowed;
+}
 
-        const stored = await chrome.storage.session.get([BRAVEFOX_WEB_AUTH_STATE_KEY]);
+async function bravefoxLoadWebAuthState() {
+    const empty = { requests: {}, pageGrants: {}, actionGrants: {} };
+    try {
+        if (!chrome.storage?.session) return empty;
+        const [stored, backup] = await Promise.all([
+            chrome.storage.session.get([BRAVEFOX_WEB_AUTH_STATE_KEY]),
+            chrome.storage.local.get([BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY])
+        ]);
         const state = stored?.[BRAVEFOX_WEB_AUTH_STATE_KEY];
+        const pageGrants = state?.pageGrants && typeof state.pageGrants === 'object' ? state.pageGrants : {};
+        if (!bravefoxSystemAuthStartupReset) {
+            const restored = bravefoxWebApprovedReusableGrants(backup?.[BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY]);
+            for (const [key, grant] of Object.entries(restored)) {
+                if (!pageGrants[key]) pageGrants[key] = grant;
+            }
+        }
         return {
             requests: state?.requests && typeof state.requests === 'object' ? state.requests : {},
-            pageGrants: state?.pageGrants && typeof state.pageGrants === 'object' ? state.pageGrants : {},
+            pageGrants,
             actionGrants: state?.actionGrants && typeof state.actionGrants === 'object' ? state.actionGrants : {}
         };
-    } catch (_) {
-        return { requests: {}, pageGrants: {}, actionGrants: {} };
-    }
+    } catch (_) { return empty; }
 }
 
 async function bravefoxSaveWebAuthState(state) {
@@ -2947,6 +3126,9 @@ async function bravefoxSaveWebAuthState(state) {
                 pageGrants: state?.pageGrants || {},
                 actionGrants: state?.actionGrants || {}
             }
+        });
+        await chrome.storage.local.set({
+            [BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY]: bravefoxWebApprovedReusableGrants(state?.pageGrants)
         });
     } catch (_) {}
 }
@@ -3160,6 +3342,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         state.pageGrants[grantKey] = {
                             mode: 'timed',
                             host: request.host,
+                            grantedAt: Date.now(),
                             expiresAt: Date.now() + BRAVEFOX_WEB_PAGE_GRANT_TTL_MS
                         };
                     }
@@ -3465,6 +3648,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 const onStartupHandler = () => {
     console.log('Extension startup detected');
     startKeepAlive();
+    // A browser restart is not an extension update: require a fresh password.
+    void bravefoxClearSystemLeaseOnBrowserStartup();
 };
 chrome.runtime.onStartup.addListener(onStartupHandler);
 
@@ -3478,6 +3663,12 @@ const onInstalledHandler = async (details) => {
     console.log('Extension installed/updated:', details.reason);
     startKeepAlive();
     
+    if (details.reason === 'install') {
+        await chrome.storage.local.remove([
+            BRAVEFOX_SYSTEM_AUTH_LEASE_KEY, BRAVEFOX_SYSTEM_PENDING_KEY,
+            BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY
+        ]);
+    }
     if ((details.reason === 'install' || details.reason === 'update') && chrome.storage.session) {
         await chrome.storage.session.clear();
     }
