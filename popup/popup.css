@@ -77,3 +77,11 @@ body {
   font-size: 12px;
   line-height: 1.35;
 }
+
+#openElementPicker {
+  background: #286fe6;
+  border-color: #286fe6;
+  color: #ffffff;
+}
+
+#openElementPicker:hover { background: #175ccf; }

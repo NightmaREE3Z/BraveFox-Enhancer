@@ -3,6 +3,19 @@
 const runtime = globalThis.chrome?.runtime;
 const updateButton = document.querySelector('#checkExtensionUpdate');
 const versionLabel = document.querySelector('#enhancerVersion');
+const pickerButton = document.querySelector('#openElementPicker');
+
+pickerButton?.addEventListener('click', async () => {
+  pickerButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'ESELECT_START' });
+    if (!response?.ok) throw new Error(response?.error || 'Could not start picker.');
+    window.close();
+  } catch (error) {
+    pickerButton.textContent = error?.message || 'Picker unavailable on this tab';
+    pickerButton.disabled = false;
+  }
+});
 
 const installedVersion = runtime?.getManifest?.().version || 'unknown';
 

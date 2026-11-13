@@ -16,6 +16,8 @@
   const CHATGPT_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
   const WEB_AUTH_TARGET = PAGE_PARAMS.get('target') === 'web';
   const WEB_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
+  const ELEMENT_AUTH_TARGET = PAGE_PARAMS.get('target') === 'element';
+  const ELEMENT_AUTH_REQUEST_ID = String(PAGE_PARAMS.get('request') || '').trim();
 
   // Build a minimal full-page scaffold in case the HTML is empty.
   function ensureBase() {
@@ -365,6 +367,27 @@
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (input.value === FIXED_PASSWORD) {
+        // Element Picker uses this existing extension-owned password screen,
+        // retaining the single established password comparison and UI.
+        if (ELEMENT_AUTH_TARGET) {
+          if (!ELEMENT_AUTH_REQUEST_ID || window !== window.top) {
+            error.textContent = 'Element Picker password request is invalid.';
+            return;
+          }
+          submit.disabled = true;
+          input.disabled = true;
+          chrome.runtime.sendMessage({ type: 'ESELECT_AUTH_APPROVE', request: ELEMENT_AUTH_REQUEST_ID }, response => {
+            const runtimeError = chrome.runtime.lastError;
+            if (runtimeError || !response?.ok) {
+              submit.disabled = false;
+              input.disabled = false;
+              error.textContent = runtimeError?.message || response?.error || 'Element Picker authentication failed.';
+              input.focus();
+            }
+            // The coordinator returns the authenticated tab to Manage.
+          });
+          return;
+        }
         // General web/action password gates are always real top-level extension pages.
         // The protected website is not left underneath an iframe or removable overlay.
         if (WEB_AUTH_TARGET) {

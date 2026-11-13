@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    // google.js of BraveFox Enhancer v29.7.5
+    // google.js of BraveFox Enhancer v29.9.0
 
     // === CHROME WEB STORE: OWN RULES (independent of Google Search) ============
     // THIS is the only place to edit Web Store-specific ID and search-term bans.
@@ -35,15 +35,16 @@
         // Search filters do not feed into this Web Store search rule list.
         const webStoreSearchRegexes = [
 	    // Regular Web Store search regexes	
-		/brows/i, /tab-/i, /-tab/i, /firefox/i, /waterfox/i, /brave/i, /vivaldi/i, /edge/i,   
+		/brows/i, /tab-/i, /-tab/i, /firefox/i, /waterfox/i, /vivaldi/i, /open in ie/i,    
 		/msedge/i, /opera/i, /IE Tab/i, /IEbridge/i, /IEability/i, /IE View/i, /mozilla/i, 
-		/agent/i, /udif/i, /epnud/i, /ep nud/i, /ndres/i, /nude/i, /nudi/i, /open in ie/i, 
+		/agent/i, /udif/i, /epnud/i, /ep nud/i, /ndres/i, /nude/i, /nudi/i, /Brave-/i, 
+		/-Brave/i, /Edge-MS/i, /MS-Edge/i, /EdgeMS/i, /brave(?!fox)/i,
 
 
 		// Boundaried Web Store search regexes
-		/\bAI\b/i, /\bIE\b/i, /\bTab\b/i, /\bTOR\b/i, /\bGX\b/i,
-
+		/\bAI\b/i, /\bIE\b/i, /\bTab\b/i, /\bTOR\b/i, /\bGX\b/i, /\bbrave\b/i, /\bedge\b/i,
         ];
+
 
         // BRAVEFOX_WEBSTORE_RULES_END
         return {
@@ -1330,7 +1331,7 @@
         /(?:ai|photo|image|body|pose)\s*[-_ ]?\s*(?:twerk|jiggle|bounce|motion|repose|pose\s*change)/i,
         /(?:ai|adult|nsfw)\s*[-_ ]?\s*(?:blow|suck|mouth|fap|boob|tit|ass|porn)/i,
         /(?:porn|adult|nsfw)\s*[-_ ]?\s*(?:ai|generator|tool|app|site|tube)/i,
-        /(?:onlyfans|fansly|chaturbate|stripchat|redgifs|xhamster|redtube|brazzers|bangbros)/i,
+        /(?:onlyfans|fansly|chaturbate|stripchat)/i,
         /(?:nude|naked|nsfw|porn|adult)\s*[-_ ]?\s*(?:image|photo|pic|video|vid|content|site|app)/i,
         /(?:vaat|vaatte|alusvaat|pait|liiv|hous).*pois/i,
         /(?:poista|poisto|poistaminen|poistamis).*vaat/i,

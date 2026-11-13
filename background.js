@@ -1,3 +1,5 @@
+import './scripts/elementselect.js';
+
 // === BraveFox Web Store-only rule bridge =====================================
 // Reads only the dedicated editable ID/regex arrays in scripts/google.js.
 // This does NOT import Google Search's nuclear, soft-result or redirect lists.
