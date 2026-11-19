@@ -1,0 +1,4793 @@
+import './scripts/elementselect.js';
+
+// === BraveFox Web Store-only rule bridge =====================================
+// Reads only the dedicated editable ID/regex arrays in scripts/google.js.
+// This does NOT import Google Search's nuclear, soft-result or redirect lists.
+// Extension content scripts cannot reliably execute on Chrome Web Store itself.
+const BRAVEFOX_WEBSTORE_SOURCE_PATH = 'scripts/google.js';
+let braveFoxWebStoreRules = {
+    extensionIds: new Set(), searchRegexes: []
+};
+
+function braveFoxParseWebStoreRulesFromGoogle(source) {
+    const start = source.indexOf('// BRAVEFOX_WEBSTORE_RULES_BEGIN');
+    const end = source.indexOf('// BRAVEFOX_WEBSTORE_RULES_END', start + 1);
+    if (start < 0 || end <= start) throw new Error('Web Store rule block is missing in scripts/google.js');
+    const block = source.slice(start, end);
+
+    function readArray(variable) {
+        const match = new RegExp('\\bconst\\s+' + variable + '\\s*=\\s*\\[([\\s\\S]*?)\\];').exec(block);
+        if (!match) throw new Error('Missing Web Store-only array: ' + variable);
+        return match[1].split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('//'));
+    }
+
+    const ids = new Set();
+    for (const line of readArray('webStoreBlockedExtensionIds')) {
+        const match = /^['"]([a-p]{32})['"]\s*,?\s*(?:\/\/.*)?$/i.exec(line);
+        if (!match) throw new Error('Invalid Web Store extension ID line: ' + line);
+        ids.add(match[1].toLowerCase());
+    }
+
+    function readRegexes(name) {
+        // Only native regex literals, with optional comma-separated entries on
+        // each line. Comments divide regular/boundary rules for easy editing.
+        // Parse characters rather than eval'ing scripts/google.js in background.
+        const regexes = [];
+        for (const line of readArray(name)) {
+            let pos = 0;
+            while (pos < line.length) {
+                while (pos < line.length && /[\s,]/.test(line[pos])) pos++;
+                if (pos >= line.length || line.startsWith('//', pos)) break;
+                if (line[pos] !== '/') throw new Error('Expected Web Store regex literal: ' + line);
+                const start = ++pos;
+                let escaped = false;
+                let inClass = false;
+                for (; pos < line.length; pos++) {
+                    const c = line[pos];
+                    if (escaped) { escaped = false; continue; }
+                    if (c === '\\') { escaped = true; continue; }
+                    if (c === '[') { inClass = true; continue; }
+                    if (c === ']') { inClass = false; continue; }
+                    if (c === '/' && !inClass) break;
+                }
+                if (pos >= line.length) throw new Error('Unterminated Web Store regex literal: ' + line);
+                const body = line.slice(start, pos++);
+                const flagStart = pos;
+                while (pos < line.length && /[a-z]/i.test(line[pos])) pos++;
+                const flags = line.slice(flagStart, pos);
+                if (/[gy]/i.test(flags)) throw new Error('Stateful Web Store flags not supported: ' + line);
+                regexes.push(new RegExp(body, flags));
+                while (pos < line.length && /\s/.test(line[pos])) pos++;
+                if (pos < line.length && line.startsWith('//', pos)) break;
+                if (pos < line.length && line[pos] !== ',') throw new Error('Missing regex separator: ' + line);
+                if (pos < line.length) pos++;
+            }
+        }
+        return regexes;
+    }
+
+    return {
+        extensionIds: ids,
+        searchRegexes: readRegexes('webStoreSearchRegexes')
+    };
+}
+
+function braveFoxIsChromeWebStoreUrl(inputUrl) {
+    try {
+        const parsed = new URL(String(inputUrl || ''));
+        return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+            parsed.hostname.toLowerCase().replace(/\.$/, '') === 'chromewebstore.google.com';
+    } catch (_) { return false; }
+}
+
+function braveFoxWebStoreDecodeSearch(raw) {
+    let value = String(raw || '').replace(/\+/g, ' ');
+    // Decode once for ordinary percent-encoding, once more for double-encoded URLs.
+    for (let n = 0; n < 2; n++) {
+        try {
+            const decoded = decodeURIComponent(value);
+            if (decoded === value) break;
+            value = decoded;
+        } catch (_) { break; }
+    }
+    return value.slice(0, 4096).trim();
+}
+
+function braveFoxWebStoreBlockedReason(inputUrl, tabTitle = '') {
+    if (!braveFoxIsChromeWebStoreUrl(inputUrl)) return null;
+    try {
+        const parsed = new URL(inputUrl);
+        const path = parsed.pathname.replace(/\/{2,}/g, '/');
+        // IDs must be complete final segments of /detail/slug/ID or /detail/ID.
+        const detail = /^\/detail\/(?:[^/]+\/)*([a-p]{32})\/?$/i.exec(path);
+        if (detail && braveFoxWebStoreRules.extensionIds.has(detail[1].toLowerCase())) {
+            return { source: 'webstore-extension-id', match: detail[1].toLowerCase() };
+        }
+        // Chrome forbids content-script inspection of its Web Store DOM. The
+        // background Tabs API exposes the page's document.title instead, which
+        // normally mirrors the listing <h1>. Check that only on detail pages,
+        // using the same dedicated Web Store regexes as submitted searches.
+        if (detail && typeof tabTitle === 'string' && tabTitle.trim()) {
+            const title = tabTitle.replace(/\s+/g, ' ').trim().slice(0, 4096);
+            for (const rx of braveFoxWebStoreRules.searchRegexes) {
+                rx.lastIndex = 0;
+                if (rx.test(title)) return { source: 'webstore-detail-title-regex', match: rx.source };
+            }
+        }
+        if (!/^\/search(?:\/|$)/i.test(path)) return null;
+        const searchPath = path.replace(/^\/search\/?/i, '');
+        const query = braveFoxWebStoreDecodeSearch(searchPath ||
+            parsed.searchParams.get('q') || parsed.searchParams.get('query') || '');
+        if (!query) return null;
+        for (const rx of braveFoxWebStoreRules.searchRegexes) {
+            rx.lastIndex = 0;
+            if (rx.test(query)) return { source: 'webstore-search-regex', match: rx.source };
+        }
+    } catch (_) {}
+    return null;
+}
+
+const braveFoxWebStorePolicyReady = fetch(chrome.runtime.getURL(BRAVEFOX_WEBSTORE_SOURCE_PATH))
+    .then(response => {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.text();
+    })
+    .then(source => {
+        braveFoxWebStoreRules = braveFoxParseWebStoreRulesFromGoogle(source);
+        return true;
+    })
+    .catch(error => {
+        console.warn('[BraveFox Web Store] Cannot load isolated rules:', error);
+        return false;
+    });
+
+// === END BraveFox Web Store-only rule bridge ==================================
+
+// BraveFox Enhancer core exclusions. These remain local to Enhancer now that
+// Focus-list management now lives in the separate standalone extension.
+const BRAVEFOX_COMPLETE_EXCLUSION_HOSTS = new Set([
+    "archive.org",
+    "iltalehti.fi",
+    "is.fi",
+    "youtube.com",
+    "wikipedia.org",
+    "netflix.com",
+    "runescape.wiki",
+    "runescape.com",
+    "chatgpt.com",
+    "getpaint.net",
+    "openai.com",
+    "reddit.com",
+    "thesmackdownhotel.com",
+    "wiktionary.org",
+    "wwe.com",
+    "amd.com",
+    "nvidia.com",
+    "intel.com",
+    "techpowerup.com",
+    "guru3d.com",
+    "jimms.fi",
+    "verkkokauppa.com",
+    "motonet.fi",
+    "datatronic.fi",
+    "multitronic.fi",
+    "proshop.fi",
+    "tori.fi",
+    "huuto.net",
+    "hintaopas.fi",
+    "yliopistonapteekki.fi",
+    "findidfb.com",
+    "lookup-id.com",
+    "facebook.com",
+    "twitch.tv",
+    "yle.fi",
+    "hs.fi",
+    "mtv.fi",
+    "mtvuutiset.fi",
+    "kauppalehti.fi",
+    "talouselama.fi",
+    "suomi.fi",
+    "kela.fi",
+    "kanta.fi",
+    "vero.fi",
+    "traficom.fi",
+    "poliisi.fi",
+    "finlex.fi",
+    "posti.fi",
+    "matkahuolto.fi",
+    "vr.fi",
+    "hsl.fi",
+    "ilmatieteenlaitos.fi",
+    "foreca.fi",
+    "op.fi",
+    "nordea.fi",
+    "s-pankki.fi",
+    "danskebank.fi",
+    "aktia.fi",
+    "alandsbanken.fi",
+    "poppankki.fi",
+    "saastopankki.fi",
+    "gigantti.fi",
+    "power.fi",
+    "hinta.fi",
+    "prisma.fi",
+    "k-ruoka.fi",
+    "tokmanni.fi",
+    "puuilo.fi",
+    "k-rauta.fi",
+    "bauhaus.fi",
+    "clasohlson.com",
+    "io-tech.fi",
+    "muropaketti.com",
+    "afterdawn.com",
+    "tomshardware.com",
+    "notebookcheck.net",
+    "videocardz.com",
+    "arstechnica.com",
+    "bleepingcomputer.com",
+    "neowin.net",
+    "pcgamer.com",
+    "igorslab.de",
+    "asus.com",
+    "msi.com",
+    "corsair.com",
+    "coolermaster.com",
+    "inno3d.com",
+    "galax.com",
+    "evga.com",
+    "gigabyte.com",
+    "aorus.com",
+    "asrock.com",
+    "zotac.com",
+    "palit.com",
+    "pny.com",
+    "sapphiretech.com",
+    "powercolor.com",
+    "noctua.at",
+    "bequiet.com",
+    "fractal-design.com",
+    "nzxt.com",
+    "lian-li.com",
+    "thermaltake.com",
+    "seasonic.com",
+    "kingston.com",
+    "crucial.com",
+    "micron.com",
+    "samsung.com",
+    "westerndigital.com",
+    "wd.com",
+    "sandisk.com",
+    "seagate.com",
+    "logitech.com",
+    "razer.com",
+    "steelseries.com",
+    "hyperx.com",
+    "acer.com",
+    "dell.com",
+    "hp.com",
+    "lenovo.com",
+    "framework.com",
+    "microsoft.com",
+    "apple.com",
+    "mozilla.org",
+    "firefox.com",
+    "afiyukent.one",
+    "accounts.google.com",
+    "support.google.com",
+    "developers.google.com",
+    "store.google.com",
+    "maps.google.com",
+    "earth.google.com",
+    "maps.app.goo.gl",
+]);
+
+const BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES = Object.freeze([
+    Object.freeze({ host: "github.com", pathPrefix: "/paintdotnet" }),
+    Object.freeze({ host: "github.com", pathPrefix: "/copilot" }),
+    Object.freeze({ host: "google.com", pathPrefix: "/maps" }),
+    Object.freeze({ host: "google.com", pathPrefix: "/earth" }),
+    Object.freeze({ host: "goo.gl", pathPrefix: "/maps" }),
+]);
+
+function normalizeBraveFoxExclusionHost(value) {
+    return String(value || '').trim().toLowerCase().replace(/^\.+|\.+$/g, '').replace(/^www\./, '');
+}
+
+function normalizeBraveFoxExclusionPath(value) {
+    let path = String(value || '/').trim();
+    if (!path.startsWith('/')) path = `/${path}`;
+    path = path.replace(/\/{2,}/g, '/').replace(/\/$/, '');
+    return path || '/';
+}
+
+function isGoogleMapsOrEarthUrl(value) {
+    try {
+        const parsed = new URL(String(value || ''));
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+        const host = normalizeBraveFoxExclusionHost(parsed.hostname);
+        const pathname = String(parsed.pathname || '/').replace(/\/{2,}/g, '/').toLowerCase();
+        const googleBaseHost = /^google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+        const googleMapsOrEarthHost = /^(?:maps|earth)\.google\.(?:[a-z]{2,3}|[a-z]{2,3}\.[a-z]{2})$/i;
+
+        if (host === 'maps.app.goo.gl' || googleMapsOrEarthHost.test(host)) return true;
+        if (host === 'goo.gl') return pathname === '/maps' || pathname.startsWith('/maps/');
+        if (!googleBaseHost.test(host)) return false;
+
+        return pathname === '/maps' || pathname.startsWith('/maps/') ||
+            pathname === '/earth' || pathname.startsWith('/earth/');
+    } catch (_) {
+        return false;
+    }
+}
+
+function isCompletelyExcludedHostname(value) {
+    const host = normalizeBraveFoxExclusionHost(value);
+    if (!host) return false;
+    if (host === 'twitch.tv' || host.endsWith('.twitch.tv')) return true;
+    if (/^translate\.google\./i.test(host)) return true;
+
+    for (const domain of BRAVEFOX_COMPLETE_EXCLUSION_HOSTS) {
+        if (host === domain || host.endsWith(`.${domain}`)) return true;
+    }
+    return false;
+}
+
+function isCompletelyExcludedUrl(value) {
+    if (isGoogleMapsOrEarthUrl(value)) return true;
+    try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+        const host = normalizeBraveFoxExclusionHost(parsed.hostname);
+        if (isCompletelyExcludedHostname(host)) return true;
+
+        const pathname = String(parsed.pathname || '/').replace(/\/{2,}/g, '/');
+        return BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.some(rule => {
+            const prefix = normalizeBraveFoxExclusionPath(rule.pathPrefix);
+            return host === rule.host && (pathname === prefix || pathname.startsWith(`${prefix}/`));
+        });
+    } catch (_) {
+        return false;
+    }
+}
+
+function getBraveFoxExclusionDescriptors() {
+    return {
+        domains: [...BRAVEFOX_COMPLETE_EXCLUSION_HOSTS],
+        pathRules: BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.map(rule => ({ ...rule }))
+    };
+}
+
+
+(function() {
+// BraveFox Enhancer "background.js" on Chromium platform
+
+// You can change this path if your internal page lives elsewhere:
+const EXT_PAGE = 'html/password-protected.html';
+
+// Sites on which BraveFox Enhancer must behave as fully disabled.
+function isBraveFoxCompletelyExcludedUrl(url) {
+    return isCompletelyExcludedUrl(url);
+}
+ 
+
+const timestamp = new Date()
+    .toLocaleTimeString('fi-FI', { hour: 'numeric', minute: '2-digit', hourCycle: 'h23' })
+    .replace('.', ':');
+console.log(`[${timestamp}] BraveFox Enhancer ${chrome.runtime.getManifest().version} initialized!`);
+
+// === ENHANCED MEMORY MANAGEMENT SYSTEM ===
+class ResourceTracker {
+    constructor() {
+        this.intervals = new Set();
+        this.timeouts = new Set();
+        this.observers = new Set();
+        this.eventCleanupFunctions = new Set();
+        this.isShuttingDown = false;
+        this.lastMemoryCheck = 0;
+        this.memoryCheckInterval = 30000; // 30 seconds
+        this.maxMemoryMB = 150; // 150MB limit for background script
+    }
+
+    addInterval(id) {
+        this.intervals.add(id);
+        return id;
+    }
+
+    addTimeout(id) {
+        this.timeouts.add(id);
+        return id;
+    }
+
+    addObserver(observer) {
+        this.observers.add(observer);
+        return observer;
+    }
+
+    addEventCleanup(cleanupFn) {
+        this.eventCleanupFunctions.add(cleanupFn);
+        return cleanupFn;
+    }
+
+    getMemoryUsage() {
+        if (performance.memory) {
+            return Math.round(performance.memory.usedJSHeapSize / (1024 * 1024));
+        }
+        return 0;
+    }
+
+    checkMemoryPressure() {
+        const now = Date.now();
+        if (now - this.lastMemoryCheck < this.memoryCheckInterval) return false;
+        
+        this.lastMemoryCheck = now;
+        const memoryMB = this.getMemoryUsage();
+        
+        if (memoryMB > this.maxMemoryMB) {
+            console.warn(`🚨 Memory pressure detected: ${memoryMB}MB > ${this.maxMemoryMB}MB`);
+            return true;
+        }
+        
+        if (memoryMB > this.maxMemoryMB * 0.8) {
+            console.log(`⚠️ Memory warning: ${memoryMB}MB (${Math.round((memoryMB/this.maxMemoryMB)*100)}%)`);
+        }
+        
+        return false;
+    }
+
+    cleanup() {
+        if (this.isShuttingDown) return;
+        this.isShuttingDown = true;
+        
+        console.log('🧹 ResourceTracker: Starting complete cleanup...');
+        
+        // Clear all intervals
+        for (const id of this.intervals) {
+            try {
+                clearInterval(id);
+            } catch (e) {}
+        }
+        this.intervals.clear();
+        
+        // Clear all timeouts
+        for (const id of this.timeouts) {
+            try {
+                clearTimeout(id);
+            } catch (e) {}
+        }
+        this.timeouts.clear();
+        
+        // Disconnect all observers
+        for (const observer of this.observers) {
+            try {
+                if (observer && typeof observer.disconnect === 'function') {
+                    observer.disconnect();
+                }
+            } catch (e) {}
+        }
+        this.observers.clear();
+        
+        // Execute cleanup functions
+        for (const cleanupFn of this.eventCleanupFunctions) {
+            try {
+                cleanupFn();
+            } catch (e) {}
+        }
+        this.eventCleanupFunctions.clear();
+        
+        const memoryMB = this.getMemoryUsage();
+        console.log(`🧹 ResourceTracker cleanup completed. Memory: ${memoryMB}MB`);
+    }
+}
+
+// Global resource tracker
+const resourceTracker = new ResourceTracker();
+
+// Initialize the set to track closed tabs
+const closedTabs = new Set();
+
+// Service worker keep-alive mechanism for force-installed extensions
+let keepAliveInterval;
+
+const startKeepAlive = () => {
+    if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        resourceTracker.intervals.delete(keepAliveInterval);
+    }
+    keepAliveInterval = setInterval(() => {
+        // Simple operation to keep service worker alive
+        chrome.storage.local.get(['keepAlive'], () => {
+            // This callback keeps the service worker active
+        });
+    }, 25000); // Every 25 seconds
+    resourceTracker.addInterval(keepAliveInterval);
+};
+
+// Start keep-alive immediately
+startKeepAlive();
+
+// Regex to match any Microsoft Edge URL (any locale, subpath, or query)
+const edgeRegex = /^https?:\/\/([a-z0-9-]+\.)*microsoft\.com(\/[a-z]{2}-[a-z]{2})?\/edge(\/|$|[?#])|^https?:\/\/([a-z0-9-]+\.)*microsoft\.com\/.*\/edge(\/|$|[?#])/i;
+
+// Add msedge.net (also used by Microsoft Edge marketing/redirects sometimes)
+const msedgeRegex = /^https?:\/\/([a-z0-9-]+\.)*msedge\.net(\/|$|[?#])/i;
+
+// Explicit domain allowlist. A base-domain entry also permits its normal subdomains
+// (for example, "xvideos.com" also permits "www.xvideos.com").
+const allowedSites = new Set([
+	"xvideos.com",
+	"redtube.com",
+	"alastonsuomi.com",
+	"bunkr.cr",
+	"balbums.st",
+	"thumbzilla.com",
+	"youporn.com",
+	"pornhub.com",
+	"sieni.us",
+	"sieni.es",
+	"fastvid.xyz",
+	"namethatporn.com",
+	"nudography.com",
+	"redgifs.com",
+]);
+
+// Dedicated high-priority DNR allow rule. This immediately overrides any older
+// xvideos.com block rule that may still exist while the fetched lists refresh.
+const ALLOWLIST_RULE_ID = 1000;
+const LEGACY_ALLOWLIST_RULE_IDS = [49999];
+
+const isAllowlistedHostname = (hostname) => {
+    if (!hostname || typeof hostname !== 'string') return false;
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, '');
+
+    for (const domain of allowedSites) {
+        const normalizedDomain = domain.toLowerCase();
+        if (normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`)) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+
+// Sites that remain accessible but must never be retained in browser history.
+// A base-domain entry also covers its normal subdomains.
+const historyAutoClearSites = new Set([
+    "xvideos.com",
+    "redtube.com",
+    "thumbzilla.com",
+    "redgifs.com",
+    "youporn.com",
+    "pornhub.com",
+    "bunkr.cr",
+    "balbums.st",
+    "alastonsuomi.com",
+    "chatgpt.com",
+    "openai.com",
+    "tiktok.com",
+    "instagram.com/popular",
+    "namethatporn.com",
+    "nudography.com",
+    "user.blocksite.co"
+]);
+
+// Bump this key whenever the auto-clear domain set or purge behavior changes so an
+// extension reload immediately cleans entries created by older BraveFox builds.
+const HISTORY_AUTO_CLEAR_PURGE_KEY = 'historyAutoClearInitialPurgeDone_v4';
+const HISTORY_AUTO_CLEAR_SWEEP_ALARM = 'bravefoxHistoryAutoClearSweep_v1';
+const HISTORY_AUTO_CLEAR_SWEEP_MINUTES = 1;
+const HISTORY_AUTO_CLEAR_CRITICAL_DOMAINS = Object.freeze(['chatgpt.com', 'openai.com']);
+const HISTORY_AUTO_CLEAR_RETRY_MS = 1600;
+const HISTORY_AUTO_CLEAR_FINAL_PURGE_MS = 2600;
+const HISTORY_AUTO_CLEAR_TAB_STORAGE_PREFIX = 'historyAutoClearTab_v1_';
+
+// Chromium can update/commit a visit after history.onVisited fires. Keep one delayed
+// retry per URL, and remember auto-clear tabs so PWA/app-window closure can trigger a
+// final domain sweep after the renderer is gone.
+const historyAutoClearRetryTimers = new Map();
+const historyAutoClearDomainPurgeTimers = new Map();
+const historyAutoClearTabs = new Map();
+
+const getHistoryAutoClearDomainForHostname = (hostname) => {
+    if (!hostname || typeof hostname !== 'string') return null;
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.$/, '');
+
+    for (const domain of historyAutoClearSites) {
+        const normalizedDomain = domain.toLowerCase();
+        if (normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`)) {
+            return normalizedDomain;
+        }
+    }
+
+    return null;
+};
+
+const isHistoryAutoClearHostname = (hostname) => Boolean(getHistoryAutoClearDomainForHostname(hostname));
+
+const getHistoryAutoClearDomainForUrl = (url) => {
+    // IMPORTANT: history auto-clear is intentionally independent from BraveFox's
+    // complete-exclusion policy. A site such as chatgpt.com can be fully
+    // trusted for blocking purposes while still being explicitly configured to leave no
+    // browser-history trail.
+    if (!url || typeof url !== 'string') return null;
+    try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') return null;
+        return getHistoryAutoClearDomainForHostname(parsedUrl.hostname);
+    } catch (_) {
+        return null;
+    }
+};
+
+const isHistoryAutoClearUrl = (url) => Boolean(getHistoryAutoClearDomainForUrl(url));
+
+const getHistoryAutoClearTabStorageKey = (tabId) => `${HISTORY_AUTO_CLEAR_TAB_STORAGE_PREFIX}${tabId}`;
+
+const removePersistedHistoryAutoClearTab = (tabId) => {
+    if (!chrome.storage.session || typeof tabId !== 'number') return;
+    void chrome.storage.session.remove([getHistoryAutoClearTabStorageKey(tabId)]).catch(() => {});
+};
+
+const trackHistoryAutoClearTab = (tabId, url, windowId = undefined) => {
+    if (typeof tabId !== 'number' || !url || typeof url !== 'string') return null;
+
+    // Do not throw away the last known ChatGPT/PWA identity for internal URLs such as
+    // about:blank that may briefly appear during app-window teardown.
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch (_) {
+        return historyAutoClearTabs.get(tabId) || null;
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        return historyAutoClearTabs.get(tabId) || null;
+    }
+
+    const domain = getHistoryAutoClearDomainForHostname(parsedUrl.hostname);
+    if (!domain) {
+        historyAutoClearTabs.delete(tabId);
+        removePersistedHistoryAutoClearTab(tabId);
+        return null;
+    }
+
+    const previous = historyAutoClearTabs.get(tabId);
+    const tracked = {
+        domain,
+        url,
+        windowId: typeof windowId === 'number' ? windowId : previous?.windowId
+    };
+
+    const unchanged = previous &&
+        previous.domain === tracked.domain &&
+        previous.url === tracked.url &&
+        previous.windowId === tracked.windowId;
+
+    historyAutoClearTabs.set(tabId, tracked);
+
+    // MV3 service workers can be suspended between opening and closing a PWA. Persist the
+    // tiny per-tab record in storage.session so tabs.onRemoved can still identify the app
+    // after a worker restart. Duplicate navigation events do not rewrite unchanged state.
+    if (!unchanged && chrome.storage.session) {
+        const key = getHistoryAutoClearTabStorageKey(tabId);
+        void chrome.storage.session.set({ [key]: tracked }).catch(() => {});
+    }
+
+    return tracked;
+};
+
+const getTrackedHistoryAutoClearTab = async (tabId) => {
+    const inMemory = historyAutoClearTabs.get(tabId);
+    if (inMemory) return inMemory;
+    if (!chrome.storage.session || typeof tabId !== 'number') return null;
+
+    try {
+        const key = getHistoryAutoClearTabStorageKey(tabId);
+        const state = await chrome.storage.session.get([key]);
+        return state[key] || null;
+    } catch (_) {
+        return null;
+    }
+};
+
+const deleteAutoClearHistoryUrl = async (url, source = 'unknown') => {
+    if (!isHistoryAutoClearUrl(url)) return false;
+
+    try {
+        await chrome.history.deleteUrl({ url });
+        console.log(`Auto-cleared history URL (${source}): ${url}`);
+        return true;
+    } catch (error) {
+        console.warn(`Failed to auto-clear history URL (${source}): ${url}`, error);
+        return false;
+    }
+};
+
+// Delete now, then retry once after Chromium has had time to finish committing the
+// navigation. Repeated events for the same URL simply move the retry later instead of
+// stacking timers.
+const scheduleAutoClearHistoryUrl = (url, source = 'unknown') => {
+    if (!isHistoryAutoClearUrl(url)) return false;
+
+    void deleteAutoClearHistoryUrl(url, source);
+
+    const existingTimer = historyAutoClearRetryTimers.get(url);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        resourceTracker.timeouts.delete(existingTimer);
+    }
+
+    const retryId = setTimeout(async () => {
+        historyAutoClearRetryTimers.delete(url);
+        resourceTracker.timeouts.delete(retryId);
+        await deleteAutoClearHistoryUrl(url, `${source} delayed retry`);
+    }, HISTORY_AUTO_CLEAR_RETRY_MS);
+
+    historyAutoClearRetryTimers.set(url, retryId);
+    resourceTracker.addTimeout(retryId);
+    return true;
+};
+
+const purgeAutoClearHistoryDomain = async (domain, source = 'domain purge') => {
+    const normalizedDomain = String(domain || '').trim().toLowerCase();
+    if (!historyAutoClearSites.has(normalizedDomain)) return 0;
+
+    let deletedCount = 0;
+    try {
+        const results = await chrome.history.search({
+            text: normalizedDomain,
+            startTime: 0,
+            maxResults: 100000
+        });
+
+        const matchingUrls = Array.from(new Set(
+            results
+                .map(entry => entry && entry.url)
+                .filter(url => getHistoryAutoClearDomainForUrl(url) === normalizedDomain)
+        ));
+
+        for (let i = 0; i < matchingUrls.length; i += 100) {
+            const batch = matchingUrls.slice(i, i + 100);
+            const resultsForBatch = await Promise.all(
+                batch.map(url => deleteAutoClearHistoryUrl(url, source))
+            );
+            deletedCount += resultsForBatch.filter(Boolean).length;
+        }
+    } catch (error) {
+        console.warn(`History auto-clear purge failed for ${normalizedDomain}:`, error);
+    }
+
+    return deletedCount;
+};
+
+// Purge matching entries that existed before this version of the extension loaded.
+const purgeAutoClearHistory = async (source = 'initial purge') => {
+    let deletedCount = 0;
+
+    for (const domain of historyAutoClearSites) {
+        deletedCount += await purgeAutoClearHistoryDomain(domain, source);
+    }
+
+    console.log(`History auto-clear purge completed: ${deletedCount} URL(s) removed.`);
+    return deletedCount;
+};
+
+// PWA/app-window shutdown is the last authoritative cleanup point. Purge immediately,
+// then once more after a short grace period in case Chromium writes a final navigation
+// record while tearing the app window down.
+const scheduleAutoClearHistoryDomainPurge = (domain, source = 'tab/window closed') => {
+    const normalizedDomain = String(domain || '').trim().toLowerCase();
+    if (!historyAutoClearSites.has(normalizedDomain)) return false;
+
+    void purgeAutoClearHistoryDomain(normalizedDomain, `${source} immediate purge`);
+
+    const existingTimer = historyAutoClearDomainPurgeTimers.get(normalizedDomain);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        resourceTracker.timeouts.delete(existingTimer);
+    }
+
+    const purgeId = setTimeout(async () => {
+        historyAutoClearDomainPurgeTimers.delete(normalizedDomain);
+        resourceTracker.timeouts.delete(purgeId);
+        const deleted = await purgeAutoClearHistoryDomain(normalizedDomain, `${source} final purge`);
+        console.log(`Final history purge for ${normalizedDomain}: ${deleted} URL(s) removed.`);
+    }, HISTORY_AUTO_CLEAR_FINAL_PURGE_MS);
+
+    historyAutoClearDomainPurgeTimers.set(normalizedDomain, purgeId);
+    resourceTracker.addTimeout(purgeId);
+    return true;
+};
+
+const runCriticalHistoryAutoClearSweep = async (source = 'periodic safety sweep') => {
+    let deletedCount = 0;
+    for (const domain of HISTORY_AUTO_CLEAR_CRITICAL_DOMAINS) {
+        deletedCount += await purgeAutoClearHistoryDomain(domain, source);
+    }
+    if (deletedCount > 0) {
+        console.log(`History safety sweep removed ${deletedCount} ChatGPT/OpenAI URL(s).`);
+    }
+    return deletedCount;
+};
+
+const ensureHistoryAutoClearSweepAlarm = () => {
+    try {
+        if (!chrome.alarms?.create) return;
+        chrome.alarms.create(HISTORY_AUTO_CLEAR_SWEEP_ALARM, {
+            periodInMinutes: HISTORY_AUTO_CLEAR_SWEEP_MINUTES
+        });
+    } catch (error) {
+        console.warn('Failed to create history auto-clear safety alarm:', error);
+    }
+};
+
+const primeHistoryAutoClearTabTracking = async () => {
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+            const url = tab?.url || tab?.pendingUrl || '';
+            if (typeof tab?.id === 'number' && url) {
+                trackHistoryAutoClearTab(tab.id, url, tab.windowId);
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to prime history auto-clear tab tracking:', error);
+    }
+};
+
+// Do the potentially broad history search only once per browser session. New visits are
+// handled individually by chrome.history/webNavigation listeners below.
+const ensureInitialHistoryAutoClearPurge = async () => {
+    try {
+        if (chrome.storage.session) {
+            const state = await chrome.storage.session.get([HISTORY_AUTO_CLEAR_PURGE_KEY]);
+            if (state[HISTORY_AUTO_CLEAR_PURGE_KEY]) return;
+
+            await purgeAutoClearHistory();
+            await chrome.storage.session.set({ [HISTORY_AUTO_CLEAR_PURGE_KEY]: true });
+            return;
+        }
+
+        await purgeAutoClearHistory();
+    } catch (error) {
+        console.warn('Failed to initialize history auto-clear purge:', error);
+    }
+};
+
+const updateAllowlistRules = async () => {
+    const trusted = getBraveFoxExclusionDescriptors();
+    const domainRules = Array.from(new Set([...allowedSites, ...trusted.domains])).map(domain => ({
+        urlFilter: `||${domain}^`,
+        label: domain
+    }));
+    const pathRules = trusted.pathRules.map(rule => ({
+        urlFilter: `||${rule.host}${rule.pathPrefix}^`,
+        label: `${rule.host}${rule.pathPrefix}`
+    }));
+    const descriptors = [...domainRules, ...pathRules];
+    const allowRules = descriptors.map((entry, index) => ({
+        id: ALLOWLIST_RULE_ID + index,
+        priority: 10000,
+        action: { type: 'allow' },
+        condition: {
+            urlFilter: entry.urlFilter,
+            resourceTypes: ['main_frame'],
+            isUrlFilterCaseSensitive: false
+        }
+    }));
+
+    const currentRuleIds = Array.from({ length: 1000 }, (_, index) => ALLOWLIST_RULE_ID + index);
+    const removeRuleIds = [...new Set([...currentRuleIds, ...LEGACY_ALLOWLIST_RULE_IDS])];
+
+    await new Promise((resolve) => {
+        chrome.declarativeNetRequest.updateDynamicRules({
+            removeRuleIds,
+            addRules: allowRules
+        }, () => {
+            if (chrome.runtime.lastError) {
+                console.error('Failed to apply BraveFox exclusion allow rules:', chrome.runtime.lastError.message);
+            } else {
+                console.log(`Applied ${allowRules.length} BraveFox exclusion DNR allow rule(s).`);
+            }
+            resolve();
+        });
+    });
+};
+
+
+// Blocklist for other domains if needed
+const blockedSites = [
+   "microsoft365.com",
+   "microsoft.com/fi-fi/edge/business/download", 
+   "microsoft.com/fi-fi/edge/business", 
+   "microsoft.com/fi-fi/edge/", 
+   "microsoft.com/fi-fi/edge/business/download?cs=3457492030&form=MA13FJ",
+   "uptodown.com/windows/browsing",
+   "uptodown.com/windows/internet",
+   "uptodown.com/windows/web-browsers",
+   "en.uptodown.com/windows/web-browsers",
+   "uptodown.com/windows/browsers",
+   "uptodown.com/windows/internet-browsers",
+   "uptodown.com/windows/browser",
+   "uptodown.com/windows/web-navigators",
+   "uptodown.com/windows/navigators",
+   "uptodown.com/windows/networking",
+   "uptodown.com/windows/networking/browsers",
+   "uptodown.com/windows/google-chrome",
+   "google-chrome.uptodown.com",
+   "google-chrome.en.uptodown.com",
+   "google-chrome.en.uptodown.com/windows",
+   "google-chrome-portable.uptodown.com",
+   "google-chrome-portable.en.uptodown.com",
+   "uptodown.com/windows/mozilla-firefox",
+   "mozilla-firefox.uptodown.com",
+   "mozilla-firefox.en.uptodown.com",
+   "mozilla-firefox.en.uptodown.com/windows",
+   "firefox.com/fi/",
+   "mozilla.fi",
+   "mozilla.org/fi/",
+   "brave.com/",
+   "brave.com",
+   "download.fi/verkko",
+   "uptodown.com/windows/microsoft-edge",
+   "microsoft-edge.uptodown.com",
+   "microsoft-edge.en.uptodown.com",
+   "microsoft-edge.en.uptodown.com/windows",
+   "uptodown.com/windows/opera",
+   "opera.uptodown.com",
+   "opera.en.uptodown.com",
+   "opera.en.uptodown.com/windows",
+   "uptodown.com/windows/brave",
+   "brave-browser.uptodown.com",
+   "brave-browser.en.uptodown.com",
+   "brave-browser-nightly.uptodown.com",
+   "brave-browser-nightly.en.uptodown.com",
+   "uptodown.com/windows/tor-browser",
+   "github.com/mozilla-firefox",
+   "softonic.com",
+   "en.softonic.com",
+   "download.it",
+   "taplink.cc",
+   "my.nextdns.io/reset-password",
+   "anonstories.org",
+   "anonyig.com",
+   "anonytik.com",
+   "anysaver.app",
+   "anysaver.app/snapchat-video-downloader",
+   "cobalt.tools",
+   "dolphinradar.com",
+   "downloadgram.org",
+   "downloadtik.to",
+   "dumpor.com",
+   "dumpor.io",
+   "fastdl.app",
+   "followspy.ai",
+   "gramhir.com",
+   "gramsnap.com",
+   "greatfon.com",
+   "greatfon.io",
+   "hlms.app",
+   "ig.tools",
+   "iganon.com",
+   "iganon.org",
+   "iganony.com",
+   "iganony.io",
+   "iganony.net",
+   "igdetective.com",
+   "igram.world",
+   "imginn.com",
+   "imginn.org",
+   "incogstory.com",
+   "inflact.com",
+   "insacret.com",
+   "insacret.io",
+   "insacret.org",
+   "insmask.com",
+   "insnoop.com",
+   "insta-navigation.com",
+   "insta-story.com",
+   "instadp.net",
+   "instanav.com",
+   "instanav.io",
+   "instanavigation.app",
+   "instanavigation.com",
+   "instanavigation.net",
+   "instapeep.com",
+   "instapv.com",
+   "instapv.io",
+   "instapv.net",
+   "instapviewer.com",
+   "instasave.net",
+   "instastalker.com",
+   "instastories.net",
+   "instavade.net",
+   "isnoop.com",
+   "tiktok.com/coin",
+   "tiktok.com/download",
+   "tiktok.com/lataa",
+   "lurkapi.com",
+   "lurkapi.com/free-tools/snapchat-story-viewer",
+   "mediapuller.com",
+   "mediapuller.com/snapchat-story-viewer",
+   "megastory.com",
+   "megastory.io",
+   "mollygram.com",
+   "musicaldown.com",
+   "peekpublic.com",
+   "peektok.com",
+   "peekviewer.com",
+   "picnob.com",
+   "picuki.app",
+   "picuki.com",
+   "picuki.io",
+   "picuki.me",
+   "picuki.site",
+   "pixnoy.com",
+   "pixwox.com",
+   "publicsnapchatstoryviewer.com",
+   "pvstory.com",
+   "pvstory.net",
+   "savefrom.net",
+   "saveinsta.app",
+   "savestories.app",
+   "savetik.co",
+   "servavid.com",
+   "smihub.com",
+   "snapany.com",
+   "snapchatdownloader.app",
+   "snapchatdownloader.app/snapchat-profile-viewer",
+   "snapchatdownloader.app/snapchat-spotlight-downloader",
+   "snapchatdownloader.app/snapchat-story-downloader",
+   "snapchatdownloader.app/snapchat-story-viewer",
+   "snapchatdownloader.app/snapchat-viewer",
+   "snapdownloader.com",
+   "snapinsta.app",
+   "snapstorysaver.com",
+   "snapstorysaver.com/snapchat-spotlight-downloader",
+   "snaptik.app",
+   "snaptik.ltd",
+   "snaptik.org",
+   "snaptik.sbs",
+   "snapvideotools.com",
+   "snapvideotools.com/snapchat-downloader",
+   "snapyloader.com",
+   "sssinstagram.com",
+   "ssstik.com",
+   "ssstik.io",
+   "ssstik.one",
+   "stealthgram.com",
+   "stealthgram.io",
+   "stealthgram.net",
+   "storiesanon.com",
+   "storiesdown.com",
+   "storiesfly.com",
+   "storiesfly.com/instagram-story-viewer",
+   "storiesfly.com/snapchat-story-viewer",
+   "storiesfly.com/tiktok-story-viewer",
+   "storiesfly.com/tools",
+   "storiesfly.com/tools/instagram-story-viewer",
+   "storiesfly.com/tools/snapchat-story-viewer",
+   "storiesig.com",
+   "storiesig.info",
+   "storiesig.net",
+   "storiesig.us",
+   "story-navigation.com",
+   "storygrab.app",
+   "storyinsta.com",
+   "storynavigation.com",
+   "storypv.com",
+   "storypv.net",
+   "storysaver.net",
+   "storytweak.com",
+   "tik.ninja",
+   "tik.observer",
+   "tik.observer/tiktok-story-viewer",
+   "tikbuddy.com",
+   "tikdownloader.io",
+   "tikghost.com",
+   "tikmate.app",
+   "tikmate.online",
+   "tikstories.com",
+   "tikstoriesviewer.com",
+   "tiktokdownload.online",
+   "tiktokio.cc",
+   "tiktokio.com",
+   "tiktokstory.net",
+   "tiktokviewer.net",
+   "tikvib.com",
+   "tikviewer.org",
+   "tmate.cc",
+   "tokcount.com",
+   "tokviewer.net",
+   "toolzu.com",
+   "ttanon.com",
+   "ttdownloader.com",
+   "ttokviewer.com",
+   "ttviewer.org",
+   "ttviewer.org/tiktok-story-viewer",
+   "unfreezetools.com",
+   "unfreezetools.com/tiktok-story-viewer",
+   "urlebird.com",
+   "viewigstory.com",
+   "viewtikstory.com",
+   "viewtiktokstory.com",
+   "tor.uptodown.com",
+   "tor.en.uptodown.com",
+   "tor.uptodown.com/windows",
+   "tor.en.uptodown.com/windows",
+   "safari.uptodown.com",
+   "safari.en.uptodown.com",
+   "safari.en.uptodown.com/windows",
+   "uptodown.com/windows/cent-browser",
+   "cent-browser.uptodown.com",
+   "cent-browser.en.uptodown.com",
+   "uptodown.com/windows/librewolf",
+   "apps.microsoft.com/detail/9nzvdkpmr9rd",
+   "librewolf.uptodown.com",
+   "librewolf.en.uptodown.com",
+   "uptodown.com/windows/internet-explorer",
+   "internet-explorer.uptodown.com",
+   "internet-explorer.en.uptodown.com",
+   "uptodown.com/windows/ccleaner-browser",
+   "ccleaner-browser.uptodown.com",
+   "ccleaner-browser.en.uptodown.com",
+   "uptodown.com/windows/chromium",
+   "chromium.uptodown.com",
+   "chromium.en.uptodown.com",
+   "chromium.uptodown.com/windows",
+   "chromium.en.uptodown.com/windows",
+   "uptodown.com/windows/epic-browser",
+   "epic-browser.uptodown.com",
+   "epic-browser.en.uptodown.com",
+   "uptodown.com/windows/theworld-browser",
+   "theworld-browser.uptodown.com",
+   "theworld-browser.en.uptodown.com",
+   "uptodown.com/windows/avant-browser",
+   "avant-browser.uptodown.com",
+   "avant-browser.en.uptodown.com",
+   "uptodown.com/windows/thorium-browser",
+   "thorium-browser.uptodown.com",
+   "thorium-browser.en.uptodown.com",
+   "uptodown.com/windows/square-1-web-browser",
+   "square-1-web-browser.uptodown.com",
+   "square-1-web-browser.en.uptodown.com",
+   "blocked.html?type=term&trigger=user%2F3ws1lu2bwli971gvhv28yemrm&source=https%3A%2F%2Fopen.spotify.com%2Fuser%2F3ws1lu2bwli971gvhv28yemrm&attempted=",
+   "uptodown.com/windows/netscape-navigator",
+   "netscape-navigator.uptodown.com",
+   "netscape-navigator.en.uptodown.com",
+   "uptodown.com/windows/vivaldi",
+   "vivaldi.uptodown.com",
+   "vivaldi.en.uptodown.com",
+   "vivaldi.en.uptodown.com/windows",
+   "uptodown.com/windows/waterfox",
+   "waterfox.uptodown.com",
+   "github.com/Lateralus138",
+   "waterfox.en.uptodown.com",
+   "m365.cloud.microsoft",
+   "m365.cloud",
+   "m365.microsoft",
+   "adblock-for-y.com",
+   "chromewebstore.google.com/search/ie%20tab",
+   "chromewebstore.google.com/search/%20browser",
+   "chromewebstore.google.com/search/browser%20",
+   "chromewebstore.google.com/search/browser",
+   "chromewebstore.google.com/search/Firefox",
+   "chromewebstore.google.com/search/tiktok",
+   "chromewebstore.google.com/search/tik%20tok",
+   "chromewebstore.google.com/detail/hehijbfgiekmjfkfjpbkbammjbdenadd",
+   "chromewebstore.google.com/detail/moffahdcgnjnglbepimcggkjacdmpojc",
+   "chromewebstore.google.com/detail/dkhhkjpckbmkfdicijemmdaieaagkcco",
+   "chromewebstore.google.com/detail/looohpideggedchhpphemdmppnmdkgfd",
+   "chromewebstore.google.com/detail/eainiiiddlnijgnbngaoflannicnhaoj",
+   "chromewebstore.google.com/detail/jlhpdjlheiegpaipcgkbampjpcdebfeo",
+   "chromewebstore.google.com/detail/cbjepagibeiigblminajoejhcbifmpag",
+   "chromewebstore.google.com/detail/ppfgedmljembchpojncdbkiflelbiofj",
+   "chromewebstore.google.com/detail/njbjhijidkjaiakmnbdjmolgffoankbc",
+   "chromewebstore.google.com/detail/aajbiffdnglkofijhbnhklmhgllaefnp",
+   "chromewebstore.google.com/detail/aomkpefnllinimbhddlfhelelngakbbn",
+   "?origindomain=microsoft365",
+   "m365.cloud.microsoft/?origindomain=microsoft365",
+   "waterfox.en.uptodown.com/windows",
+   "uptodown.com/windows/uc-browser",
+   "uc-browser-pc.uptodown.com",
+   "uc-browser-pc.en.uptodown.com",
+   "uc-browser-pc.en.uptodown.com/windows",
+   "uptodown.com/windows/yandex-browser",
+   "yandex-browser.uptodown.com",
+   "yandex-browser.en.uptodown.com",
+   "apps.microsoft.com/detail/9mxbp1fb84cq",
+   "apps.microsoft.com/detail/9nh2gph4jzs4",
+   "apps.microsoft.com/detail/9nrtvfllggtv",
+   "a/JldxWY54",
+   "a/R3UmItwV",
+   "a/MssYJFJt",
+   "f/r4tcMhbAirsDJ",
+   "f/wOza8H8xn1YFV",
+   "f/DKw45ExJ99P7P",
+   "f/qTwJDQ0xRFuX5",
+   "f/Xcj7kczZCrkaW",
+   "f/xnl3Q9MoicCHt",
+   "f/bpTBVUY8P8q9z",
+   "f/E17wc5RWVSpJu",
+   "f/UwuF7kGBy7Q0P",
+   "f/FRxc0A0I4erng",
+   "f/71TZ2FuIcxIFQ",
+   "f/zFbwdDyzpvTdI",
+   "viamaker.uptodown.com",
+   "viamaker.en.uptodown.com",
+   "capcut.uptodown.com",
+   "capcut.en.uptodown.com",
+   "catcut-video-editor-and-maker.uptodown.com",
+   "catcut-video-editor-and-maker.en.uptodown.com",
+   "reddit.com/answers",
+   "fantopia.mystrikingly.com",
+   "www.softorbits.net",
+   "softorbits.net",
+   "virtualbox.com",
+   "virtualbox.net",
+   "vmware.com",
+   "oracle.com",
+   "oracle.org",
+   "oracle.net",
+   "waterfox.net",
+   "download.fi",
+   "vsco.co",
+   "pinterest.com",
+   "gemini.google.com",
+   "tiktok.com/@karabr",
+   "tiktok.com/@kara",
+   "tiktok.com/@karts",
+   "tiktok.com/@just.se.mimmi",
+   "tiktok.com/@m1mmuska",
+   "instagram.com/karabr",
+   "instagram.com/piia_barlund",
+   "tiktok.com/@bulgaru",
+   "tiktok.com/@laur",
+   "instagram.com/julmakira",
+   "lite.irc-galleria.net",
+   "irc-galleria.fi",
+   "irc.fi",
+   "reddit.com/r/comfyui",
+   "xvideos.com/c/AI-239",
+   "comfy.org",
+   "runcomfy.com",
+   "facebook.com/prowrestlingworld",
+   "stable-diffusion-art.com",
+   "comfyui.org",
+   "thinkdiffusion.com",
+   "threads.com",
+   "threads.net",
+   "grok.com",
+   "grok.ai",
+   "pwpix.net",
+   "reveddit.com/v/jumalattaretPro",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2F418s0mmtpve81.jpg",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2F5sj5dp809wg71.jpg",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fqc3dwb3zpmm81.jpg",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fkwfiq6v52dp81.jpg",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fmh3mrxsf4cg91.jpg",
+   "reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fcl2le6iawhk71.jpg",
+   "reddit.com/u/birppis",
+   "reveddit.com/y/birppis",
+   "jiujau.blogspot.com",
+   "jiujau.blogspot.fi",
+   "perttas.blogspot.com",
+   "perttas.blogspot.fi",
+   "instagram.com/nickiminaj",
+   "instagram.com/ninnuliin11",
+   "instagram.com/n1nnul11n11.real",
+   "instagram.com/n1nnul11n11_reels",
+   "facebook.com/profile.php?id=100000639309471",
+   "irc-galleria.net/user/irpp4/album?page=0",
+   "irc-galleria.net/user/irpp4/album?page=1",
+   "irc-galleria.net/user/irpp4",
+   "irc-galleria.net/irpp4",
+   "instagram.com/accounts/hide_story_and_live",
+   "www.reddit.com/user/birppis/comments/",
+   "www.reddit.com/user/birppis/submitted/",
+   "www.reddit.com/user/birppis/posts/",
+   "www.reddit.com/user/birppis/comments",
+   "www.reddit.com/user/birppis/submitted",
+   "www.reddit.com/user/birppis/posts",
+   "studio.creativefabrica.com",
+   "www.creativefabrica.com",
+   "tiktok.com/@juliana.rasikannas",
+   "reddit.com/user/JulianaRasikannas",
+   "instagram.com/popular",
+   "reddit.com/r/snappijuorut",
+   "reddit.com/r/snappisensuroimat0n",
+   "snapchat.com/@",
+   "pinterest.com",
+   "snapchat.com/spotlight",
+   "instagram.com/popular",
+   "instagram.com/misk33waaa",
+   "instagram.com/mafiaprinsessa",
+   "dashboard.g2a.com/support/conversations/view/M-VJYS-724654",
+   "dashboard.g2a.com/support/conversations/view/M-LSMI-906369",
+   "tiktok.com/search?q=katarii",
+   "tiktok.com/search?q=kara",
+   "tiktok.com/search?q=kart",
+   "tiktok.com/search?q=bränn",
+   "tiktok.com/search?q=brann",
+   "tiktok.com/search?q=br4nn",
+   "tiktok.com/search?q=just",
+   "tiktok.com/search?q=m1mm",
+   "tiktok.com/search?q=mimm",
+   "tiktok.com/search?q=ira",
+   "tiktok.com/search?q=alexa",
+   "tiktok.com/search?q=blis",
+   "tiktok.com/@katarii",
+   "instagram.com/katarii"
+];
+
+// Blocked TLDs for auto-closure
+const blockedTLDs = [
+    '.ai', '.art', '.makeup', '.off', '.club', '.id', '.best', '.cc', '.cn', '.click', '.exposed', '.fun',
+    '.you','.top', '.me', '.us', '.vip', '.hot', '.her', '.sex', '.xxx', '.nsfw', '.fyi', '.asia', '.ee',
+    '.porn', '.show', '.work', '.fit', '.tool', '.tools', '.system', '.systems', '.surf', '.review', '.fr', 
+    '.tokyo', '.monster', '.info', '.机构', '.xn--nqv7f', '.in', '.gf', '.fox', '.moe', '.cat', '.nude',
+    '.life', '.now', '.today', '.world', '.zone', '.bot', '.red', 
+];
+
+// Memory-optimized cache with size limit and TTL
+class MemoryManagedCache {
+    constructor(maxSize = 1000, ttlMs = 300000) {
+        this.cache = new Map();
+        this.timers = new Map();
+        this.maxSize = maxSize;
+        this.ttlMs = ttlMs;
+        this.lastCleanup = Date.now();
+        this.cleanupInterval = Math.min(ttlMs / 4, 60000); // Cleanup every 60s max
+    }
+
+    set(key, value) {
+        // Periodic cleanup
+        const now = Date.now();
+        if (now - this.lastCleanup > this.cleanupInterval) {
+            this.cleanup();
+            this.lastCleanup = now;
+        }
+
+        // Clear existing timer if key exists
+        if (this.timers.has(key)) {
+            clearTimeout(this.timers.get(key));
+            resourceTracker.timeouts.delete(this.timers.get(key));
+        }
+
+        // Enforce size limit
+        if (this.cache.size >= this.maxSize && !this.cache.has(key)) {
+            const firstKey = this.cache.keys().next().value;
+            this.delete(firstKey);
+        }
+
+        // Set with TTL
+        this.cache.set(key, value);
+        const timer = setTimeout(() => {
+            this.delete(key);
+        }, this.ttlMs);
+        this.timers.set(key, timer);
+        resourceTracker.addTimeout(timer);
+
+        return this;
+    }
+
+    get(key) {
+        return this.cache.get(key);
+    }
+
+    has(key) {
+        return this.cache.has(key);
+    }
+
+    delete(key) {
+        if (this.timers.has(key)) {
+            clearTimeout(this.timers.get(key));
+            resourceTracker.timeouts.delete(this.timers.get(key));
+            this.timers.delete(key);
+        }
+        return this.cache.delete(key);
+    }
+
+    clear() {
+        for (const timer of this.timers.values()) {
+            clearTimeout(timer);
+            resourceTracker.timeouts.delete(timer);
+        }
+        this.timers.clear();
+        this.cache.clear();
+    }
+
+    cleanup() {
+        // Force cleanup of expired entries
+        const now = Date.now();
+        for (const [key, timer] of this.timers.entries()) {
+            // Check if timer has expired (approximate)
+            if (timer._idleStart && now - timer._idleStart > this.ttlMs) {
+                this.delete(key);
+            }
+        }
+    }
+
+    size() {
+        return this.cache.size;
+    }
+}
+
+// Memory-optimized caches with automatic cleanup
+const hostsCache = new MemoryManagedCache(1000);
+
+// In-memory hosts list for immediate tab closure checking
+let hostsListForClosure = new Set();
+
+// Enhanced fetch with retry mechanism for force-installed extensions
+const fetchHostsFileWithRetry = async (url, maxRetries = 3) => {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`Fetching hosts file (attempt ${attempt}/${maxRetries}): ${url}`);
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30-second timeout
+            resourceTracker.addTimeout(timeoutId);
+            
+            const response = await fetch(url, {
+                signal: controller.signal,
+                cache: 'no-store', // FORCE Chrome to bypass disk cache entirely
+                headers: {
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0',
+                    'User-Agent': 'Mozilla/5.0 (Chrome Extension)'
+                }
+            });
+            
+            clearTimeout(timeoutId);
+            resourceTracker.timeouts.delete(timeoutId);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const text = await response.text();
+            
+            // Split lines, filter comments/empty, get host field
+            const hosts = text.split('\n').reduce((acc, line) => {
+                if (line.trim() && !line.trim().startsWith('#')) {
+                    const parts = line.split(/\s+/);
+                    if (parts.length > 1 && parts[1]) {
+                        // Handle both "0.0.0.0 domain.com" and "127.0.0.1 domain.com" formats
+                        if (parts[0] === '0.0.0.0' || parts[0] === '127.0.0.1') {
+                            acc.push(parts[1]);
+                        } else {
+                            // Fallback for other formats
+                            acc.push(parts[1]);
+                        }
+                    }
+                }
+                return acc;
+            }, []);
+            
+            console.log(`Successfully fetched ${hosts.length} hosts from ${url}`);
+            return hosts;
+            
+        } catch (error) {
+            console.error(`Attempt ${attempt} failed for ${url}:`, error);
+            
+            if (attempt === maxRetries) {
+                console.error('All retry attempts failed, returning empty array');
+                return [];
+            }
+            
+            // Wait before retry (exponential backoff)
+            const delay = Math.pow(2, attempt) * 1000;
+            await new Promise(resolve => {
+                const timeoutId = setTimeout(resolve, delay);
+                resourceTracker.addTimeout(timeoutId);
+            });
+        }
+    }
+    return [];
+};
+
+// Function to fetch and parse hosts file (handles both 0.0.0.0 and regular formats)
+const fetchHostsFile = async (url) => {
+    return await fetchHostsFileWithRetry(url);
+};
+
+// Compare the effective stored hosts set before touching the chunk keys. Rewriting the
+// same set (or only changing its order) resets google.js's central-policy generation
+// and briefly hides already-approved results. Missing/corrupt chunks are not trusted.
+const hasStoredHostsSetChanged = async (list) => {
+    try {
+        const meta = await chrome.storage.local.get(['hostsChunks', 'hostsTotal']);
+        const count = meta.hostsChunks;
+        if (!Number.isSafeInteger(count) || count < 1 || count > 1000 ||
+            !Number.isSafeInteger(meta.hostsTotal) || meta.hostsTotal < 0) return true;
+
+        const chunkKeys = [];
+        for (let i = 0; i < count; i++) chunkKeys.push(`hostsChunk_${i}`);
+        const chunksObj = await chrome.storage.local.get(chunkKeys);
+        const storedSet = new Set();
+        let storedCount = 0;
+
+        for (let i = 0; i < count; i++) {
+            const chunk = chunksObj[`hostsChunk_${i}`];
+            if (!Array.isArray(chunk)) return true;
+            storedCount += chunk.length;
+            for (const host of chunk) storedSet.add(host);
+        }
+
+        if (storedCount !== meta.hostsTotal) return true;
+        const freshSet = new Set(list);
+        if (storedSet.size !== freshSet.size) return true;
+        for (const host of freshSet) {
+            if (!storedSet.has(host)) return true;
+        }
+        return false;
+    } catch (error) {
+        console.warn('Could not compare cached hosts; performing normal storage update:', error);
+        return true;
+    }
+};
+
+// Store the fetched hosts list in local storage (CHUNKED to avoid quota exceeded!)
+const storeHostsList = async (list) => {
+    if (!(await hasStoredHostsSetChanged(list))) {
+        console.log(`Hosts set unchanged (${new Set(list).size} hosts); preserving stored chunks and lastUpdate.`);
+        return false;
+    }
+
+    // Chunk size chosen to stay well below Chrome's per-item quota
+    const chunkSize = 25000;
+    const chunks = [];
+    for (let i = 0; i < list.length; i += chunkSize) {
+        chunks.push(list.slice(i, i + chunkSize));
+    }
+
+    const storageObj = {
+        hostsChunks: chunks.length,
+        hostsTotal: list.length,
+        lastUpdate: Date.now()
+    };
+    // Store each chunk as hostsChunk_0, hostsChunk_1, ...
+    chunks.forEach((chunk, idx) => {
+        storageObj[`hostsChunk_${idx}`] = chunk;
+    });
+
+    return await new Promise(resolve => {
+        chrome.storage.local.set(storageObj, () => {
+            if (chrome.runtime.lastError) {
+                console.error('Error storing hosts list:', chrome.runtime.lastError);
+                resolve(false);
+            } else {
+                console.log(`Hosts list stored: ${list.length} hosts in ${chunks.length} chunks`);
+                resolve(true);
+            }
+        });
+    });
+};
+
+// Helper to retrieve all hosts from storage (re-assembles from chunks)
+const getAllHostsList = async () => {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(['hostsChunks', 'hostsTotal'], (meta) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error getting hosts metadata:', chrome.runtime.lastError);
+                return resolve([]);
+            }
+            
+            const totalChunks = meta.hostsChunks || 0;
+            if (!totalChunks) return resolve([]);
+            
+            const chunkKeys = [];
+            for (let i = 0; i < totalChunks; i++) {
+                chunkKeys.push(`hostsChunk_${i}`);
+            }
+            
+            chrome.storage.local.get(chunkKeys, (chunksObj) => {
+                if (chrome.runtime.lastError) {
+                    console.error('Error getting hosts chunks:', chrome.runtime.lastError);
+                    return resolve([]);
+                }
+                
+                let hosts = [];
+                for (let i = 0; i < totalChunks; i++) {
+                    if (Array.isArray(chunksObj[`hostsChunk_${i}`])) {
+                        hosts = hosts.concat(chunksObj[`hostsChunk_${i}`]);
+                    }
+                }
+                resolve(hosts);
+            });
+        });
+    });
+};
+
+// Helper function for garbage collection
+const tryGarbageCollection = () => {
+    try {
+        if (typeof self !== 'undefined' && self.gc) {
+            self.gc();
+        } else if (typeof window !== 'undefined' && window.gc) {
+            window.gc();
+        }
+    } catch (error) {
+        // Garbage collection not available, ignore
+    }
+};
+
+// Incremental DNR host-rule management. Preserve high-priority allow rules, incognito
+// rules, and unchanged host rules; only BraveFox-owned host blocks use 50000-60000.
+// DNR is an on-disk browser rule engine, not a JavaScript heap cache: clearing and
+// rebuilding every rule does not improve RAM usage and can briefly remove protection.
+const BRAVEFOX_DNR_HOST_RULE_START = 50000;
+const BRAVEFOX_DNR_HOST_RULE_END = 60000;
+
+function normalizeBraveFoxBlockedHost(value) {
+    const host = String(value || '').trim().toLowerCase().replace(/\.$/, '');
+    return /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)
+        ? host : '';
+}
+
+function getBraveFoxManagedDnrHost(rule) {
+    if (!rule || rule.id < BRAVEFOX_DNR_HOST_RULE_START ||
+        rule.id > BRAVEFOX_DNR_HOST_RULE_END || rule.action?.type !== 'block' ||
+        rule.priority !== 1 || !rule.condition?.resourceTypes?.includes('main_frame')) return '';
+    const filter = String(rule.condition.urlFilter || '');
+    const newMatch = filter.match(/^\|\|([a-z0-9.-]+)\^$/i);
+    const oldMatch = filter.match(/^\*:\/\/([a-z0-9.-]+)\/\*$/i);
+    return normalizeBraveFoxBlockedHost((newMatch || oldMatch || [])[1]);
+}
+
+const manageDynamicRules = async (hostsList) => {
+    try {
+        const allRules = await chrome.declarativeNetRequest.getDynamicRules();
+        const occupiedIds = new Set(allRules.map(rule => rule.id));
+        const oldHostRules = allRules.map(rule => ({
+            rule, host: getBraveFoxManagedDnrHost(rule)
+        })).filter(row => Boolean(row.host));
+        const maxHostRules = BRAVEFOX_DNR_HOST_RULE_END - BRAVEFOX_DNR_HOST_RULE_START + 1;
+        const hosts = Array.from(new Set((Array.isArray(hostsList) ? hostsList : [])
+            .map(normalizeBraveFoxBlockedHost).filter(Boolean))).slice(0, maxHostRules);
+        const wanted = new Set(hosts);
+        const retainedHosts = new Set();
+        const removeIds = [];
+        const addRules = [];
+        const freeIds = [];
+
+        for (const { rule, host } of oldHostRules) {
+            const desiredFilter = `||${host}^`;
+            if (!wanted.has(host) || retainedHosts.has(host)) {
+                removeIds.push(rule.id);
+                freeIds.push(rule.id);
+                continue;
+            }
+            retainedHosts.add(host);
+            if (rule.condition.urlFilter !== desiredFilter ||
+                rule.condition.isUrlFilterCaseSensitive === true) {
+                removeIds.push(rule.id);
+                addRules.push({
+                    id: rule.id, priority: 1, action: { type: 'block' },
+                    condition: { urlFilter: desiredFilter, resourceTypes: ['main_frame'],
+                        isUrlFilterCaseSensitive: false }
+                });
+            }
+        }
+
+        // Never take IDs belonging to another component's dynamic rules.
+        for (let id = BRAVEFOX_DNR_HOST_RULE_START; id <= BRAVEFOX_DNR_HOST_RULE_END; id++) {
+            if (!occupiedIds.has(id)) freeIds.push(id);
+        }
+        const free = [...new Set(freeIds)].sort((a, b) => a - b);
+        let freeIndex = 0;
+        for (const host of hosts) {
+            if (retainedHosts.has(host)) continue;
+            const id = free[freeIndex++];
+            if (id === undefined) break;
+            addRules.push({
+                id, priority: 1, action: { type: 'block' },
+                condition: { urlFilter: `||${host}^`, resourceTypes: ['main_frame'],
+                    isUrlFilterCaseSensitive: false }
+            });
+        }
+
+        if (!removeIds.length && !addRules.length) {
+            console.log(`DNR host rules unchanged (${retainedHosts.size} retained).`);
+            return true;
+        }
+
+        // Chrome applies each batch atomically. Replacements remove and add the same ID
+        // together; unrelated dynamic rules are never deleted. Keep old coverage on
+        // failure and report errors rather than silently declaring a successful rebuild.
+        const replacementIds = new Set(addRules.map(rule => rule.id));
+        const obsoleteIds = removeIds.filter(id => !replacementIds.has(id));
+        const pendingAdds = addRules.slice();
+        const pendingRemovals = removeIds.filter(id => replacementIds.has(id));
+        const batchSize = 500;
+        let successfulAdds = 0;
+        while (pendingAdds.length || pendingRemovals.length) {
+            const addBatch = pendingAdds.splice(0, batchSize);
+            const addIds = new Set(addBatch.map(rule => rule.id));
+            const removeBatch = pendingRemovals.filter(id => addIds.has(id));
+            pendingRemovals.splice(0, pendingRemovals.length,
+                ...pendingRemovals.filter(id => !addIds.has(id)));
+            try {
+                await chrome.declarativeNetRequest.updateDynamicRules({
+                    removeRuleIds: removeBatch,
+                    addRules: addBatch
+                });
+                successfulAdds += addBatch.length;
+            } catch (error) {
+                console.error('BraveFox DNR host batch failed; existing unrelated rules are intact:', error);
+                return false;
+            }
+        }
+        for (let start = 0; start < obsoleteIds.length; start += batchSize) {
+            try {
+                await chrome.declarativeNetRequest.updateDynamicRules({
+                    removeRuleIds: obsoleteIds.slice(start, start + batchSize)
+                });
+            } catch (error) {
+                console.error('BraveFox DNR obsolete-host cleanup failed:', error);
+                return false;
+            }
+        }
+        console.log(`DNR hosts synchronized: ${retainedHosts.size} retained, ${successfulAdds} added/replaced, ${obsoleteIds.length} removed, ${hostsList.length} available to tab closure.`);
+        return true;
+    } catch (error) {
+        console.error('BraveFox incremental DNR host update failed:', error);
+        return false;
+    }
+};
+
+// Enhanced initialization function for force-installed extensions
+const initializeExtension = async () => {
+    console.log('Initializing extension...');
+
+    // Reassert Enhancer core exclusions before cached/legacy block rules can affect navigation.
+    await updateAllowlistRules();
+    
+    // Check if we have cached hosts first
+    const cachedHosts = await getAllHostsList();
+    if (cachedHosts.length > 0) {
+        hostsListForClosure = new Set(cachedHosts);
+        console.log(`Loaded ${cachedHosts.length} cached hosts for immediate blocking`);
+    }
+    
+    // Update blocklist and background data
+    await updateBlocklist();
+    await updateIncognitoBlockingRules();
+    updateWrestlingRoster();
+    
+    console.log('Extension initialization completed');
+
+    // Scan any existing tabs and redirect protected system pages to the lock page
+    await scanAndRedirectProtectedTabs();
+};
+
+// Memory-optimized blocklist update (fetch all, dedupe, limit for rules, store full list in chunks)
+const updateBlocklist = async () => {
+    console.log("Fetching hosts list...");
+    const sources = [
+        {
+            id: 'BraveFoxHosts',
+            url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/BraveFoxHosts',
+            fallbackPath: 'lists/BraveFoxHosts'
+        },
+        {
+            id: 'StevenBlack',
+            url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-porn/hosts'
+        },
+        {
+            id: 'legacyFox',
+            url: 'https://raw.githubusercontent.com/NightmaREE3Z/Focus-Master/refs/heads/BraveFox/blocker/lists/legacyFox',
+            fallbackPath: 'lists/legacyFox'
+        }
+    ];
+
+    // Fetch and concat all hosts files
+    let allHosts = [];
+    let incompleteSources = false;
+    
+    // NEW: Cache buster to force a true fetch from GitHub/CDN on every extension refresh
+    const cacheBuster = `?force_refresh=${Date.now()}`;
+    for (const source of sources) {
+        const fetchUrl = source.url + cacheBuster;
+        let hosts = await fetchHostsFile(fetchUrl);
+        if (!hosts.length) {
+            incompleteSources = true;
+            if (source.fallbackPath) {
+                console.warn(`Remote ${source.id} fetch failed; loading bundled fallback.`);
+                hosts = await fetchHostsFile(chrome.runtime.getURL(source.fallbackPath));
+            }
+        }
+        allHosts = allHosts.concat(hosts);
+    }
+
+    // Packaged lists are an authoritative baseline even when the remote fetch succeeds.
+    // This makes extension updates deterministic: newly bundled entries become effective
+    // immediately instead of waiting for an older remote/cache generation to catch up.
+    let bundledBaselineInputCount = 0;
+    for (const fallbackPath of ['lists/BraveFoxHosts', 'lists/legacyFox']) {
+        const bundledHosts = await fetchHostsFile(chrome.runtime.getURL(fallbackPath));
+        if (Array.isArray(bundledHosts) && bundledHosts.length) {
+            bundledBaselineInputCount += bundledHosts.length;
+            allHosts = allHosts.concat(bundledHosts);
+        }
+    }
+    // Do not shrink an established blocking set because one network source failed.
+    // Retain previously known domains until every remote source can be refreshed.
+    // New bundled/available entries are still merged and remain authoritative.
+    if (incompleteSources) {
+        const cachedHosts = await getAllHostsList();
+        if (cachedHosts.length) {
+            allHosts = allHosts.concat(cachedHosts);
+            console.warn(`Incomplete hosts refresh: preserving ${cachedHosts.length} cached entries alongside available sources.`);
+        } else if (!allHosts.length) {
+            console.warn('All hosts sources unavailable; keeping current in-memory/DNR policy unchanged.');
+            return;
+        }
+    }
+
+    braveFoxCentralBundledBaselineMerged = false;
+    braveFoxCentralBundledBaselineCount = bundledBaselineInputCount;
+    tryGarbageCollection();
+
+    // Deduplicate, then remove explicitly allowlisted domains and their subdomains.
+    const deduplicatedHosts = Array.from(new Set(allHosts));
+    const uniqueHostsList = Array.from(new Set(deduplicatedHosts.map(normalizeBraveFoxBlockedHost).filter(Boolean)))
+        .filter(host => !isAllowlistedHostname(host) && !isCompletelyExcludedHostname(host));
+    const allowlistedHostsRemoved = deduplicatedHosts.length - uniqueHostsList.length;
+    console.log(`Unique hosts list has ${uniqueHostsList.length} hosts (${allowlistedHostsRemoved} allowlisted entries removed)`);
+
+    // Update in-memory hosts list for immediate tab closure checking (ALL hosts)
+    hostsListForClosure = new Set(uniqueHostsList);
+    braveFoxCentralBundledBaselineMerged = true;
+    braveFoxCentralBundledBaselineCount = bundledBaselineInputCount;
+    console.log(`Updated in-memory hosts list for tab closure: ${hostsListForClosure.size} hosts`);
+
+    // Use new dynamic rule management system
+    await manageDynamicRules(uniqueHostsList);
+
+    // Incremental DNR management never removes the high-priority allow rules.
+    
+    // Store full list regardless of DNR limits; identical sets must not rewrite the chunks.
+    await storeHostsList(uniqueHostsList);
+    console.log("Blocklist has been updated.");
+
+    allHosts = null;
+    tryGarbageCollection();
+};
+
+// Function to handle incognito blocking rules
+const updateIncognitoBlockingRules = async () => {
+    return new Promise((resolve) => {
+        chrome.windows.getAll({}, (windows) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error getting windows:', chrome.runtime.lastError);
+                resolve();
+                return;
+            }
+            
+            const isIncognitoWindowActive = windows.some(window => window.incognito);
+
+            if (isIncognitoWindowActive) {
+                const incognitoRules = [
+                    {
+                        id: 29999,
+                        priority: 1,
+                        action: { type: 'block' },
+                        condition: {
+                            urlFilter: '*://user.blocksite.co/*',
+                            resourceTypes: ['main_frame'],
+                            isUrlFilterCaseSensitive: false
+                        }
+                    },
+                    {
+                        id: 30000,
+                        priority: 1,
+                        action: { type: 'block' },
+                        condition: {
+                            urlFilter: '*://user.blocksite.co/options*',
+                            resourceTypes: ['main_frame'],
+                            isUrlFilterCaseSensitive: false
+                        }
+                    }
+                ];
+
+                chrome.declarativeNetRequest.updateDynamicRules({
+                    addRules: incognitoRules,
+                    removeRuleIds: [29999, 30000]
+                }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.error('Failed to add incognito blocking rules:', chrome.runtime.lastError.message);
+                    } else {
+                        console.log('Incognito blocking rules added successfully');
+                    }
+                    resolve();
+                });
+            } else {
+                chrome.declarativeNetRequest.updateDynamicRules({
+                    removeRuleIds: [29999, 30000]
+                }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.error('Failed to remove incognito blocking rules:', chrome.runtime.lastError.message);
+                    } else {
+                        console.log('Incognito blocking rules removed successfully');
+                    }
+                    resolve();
+                });
+            }
+        });
+    });
+};
+
+// Parse configured blockedSites as real hosts/paths/queries rather than raw href
+// substrings. A tracker domain embedded in another site's query string is NOT the
+// visited site's hostname. Intentional path-only entries remain path-specific.
+const BRAVEFOX_BLOCKED_SITE_RULES = blockedSites.map(entry => {
+    const text = String(entry || '').trim();
+    if (!text) return null;
+    if (text.startsWith('?')) {
+        try {
+            return { kind: 'query', params: [...new URLSearchParams(text.slice(1))] };
+        } catch (_) { return null; }
+    }
+    const isPathOnly = !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+/i.test(text) ||
+        /^[^/?]+\.html?(?:[/?]|$)/i.test(text);
+    try {
+        const parsed = new URL(`https://${isPathOnly ? 'bravefox.invalid/' : ''}${text.replace(/^\//, '')}`);
+        if (!isPathOnly && !normalizeBraveFoxBlockedHost(parsed.hostname)) return null;
+        return {
+            kind: isPathOnly ? 'path' : 'host',
+            host: isPathOnly ? '' : parsed.hostname.toLowerCase(),
+            path: parsed.pathname.replace(/\/{2,}/g, '/'),
+            params: [...parsed.searchParams]
+        };
+    } catch (_) { return null; }
+}).filter(Boolean);
+
+const braveFoxBlockedSiteRuleMatch = (parsed, rule) => {
+    if (rule.kind === 'query') {
+        return rule.params.every(([key, value]) => parsed.searchParams.getAll(key).includes(value));
+    }
+    if (rule.kind === 'host' && !(parsed.hostname === rule.host ||
+        parsed.hostname.endsWith(`.${rule.host}`))) return false;
+    const pathname = parsed.pathname.replace(/\/{2,}/g, '/');
+    const path = rule.path === '/' ? '/' : rule.path.replace(/\/$/, '');
+    if (path !== '/' && !(pathname === path || pathname.startsWith(`${path}/`))) return false;
+    if (rule.kind === 'path' && !path.startsWith('/')) return false;
+    return rule.params.every(([key, value]) => parsed.searchParams.getAll(key).includes(value));
+};
+
+const findBraveFoxBlockedSiteRule = parsed => {
+    for (let index = 0; index < BRAVEFOX_BLOCKED_SITE_RULES.length; index++) {
+        if (braveFoxBlockedSiteRuleMatch(parsed, BRAVEFOX_BLOCKED_SITE_RULES[index])) {
+            return blockedSites[index];
+        }
+    }
+    return '';
+};
+
+// Extract hostname from URL
+const getHostnameFromUrl = (url) => {
+    try {
+        const urlObj = new URL(url);
+        return urlObj.hostname.toLowerCase().replace(/\.$/, '');
+    } catch (error) {
+        return null;
+    }
+};
+
+// A single explicit URL verdict is shared by tab closure and the central bridge.
+const findBraveFoxBlockedUrlReason = url => {
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+        const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        const webStoreHit = braveFoxWebStoreBlockedReason(parsed.href);
+        if (webStoreHit) return webStoreHit;
+        if (isBraveFoxCompletelyExcludedUrl(parsed.href) || isAllowlistedHostname(hostname)) return null;
+        if (edgeRegex.test(parsed.href) || msedgeRegex.test(parsed.href)) {
+            return { source: 'browser-deny-regex', match: hostname };
+        }
+        const blockedSite = findBraveFoxBlockedSiteRule(parsed);
+        if (blockedSite) return { source: 'blockedSites', match: blockedSite };
+        const blockedHost = findBraveFoxCentralBlockedHost(hostname);
+        if (blockedHost) return { source: 'fetched-hosts', match: blockedHost };
+        const blockedTLD = blockedTLDs.find(tld => hostname.endsWith(tld));
+        if (blockedTLD) return { source: 'blockedTLDs', match: blockedTLD };
+    } catch (_) {}
+    return null;
+};
+
+// Check if URL should be blocked (for immediate tab closure)
+const isBlockedUrl = url => Boolean(findBraveFoxBlockedUrlReason(url));
+
+// === Central URL policy bridge ================================================
+// Content scripts that already filter links/results can ask the background for the
+// same URL verdict BraveFox uses for top-level navigation. Keep the huge fetched
+// hosts list here instead of cloning it into every tab as thousands of regexes.
+const BRAVEFOX_CENTRAL_URL_POLICY_SNAPSHOT_TYPE = 'BRAVEFOX_GET_CENTRAL_URL_POLICY_SNAPSHOT';
+const BRAVEFOX_CENTRAL_URL_POLICY_CLASSIFY_TYPE = 'BRAVEFOX_CLASSIFY_CENTRAL_URLS';
+const BRAVEFOX_CENTRAL_URL_POLICY_MAX_BATCH = 256;
+let braveFoxCentralHostsReadyPromise = null;
+let braveFoxCentralBundledBaselineMerged = false;
+let braveFoxCentralBundledBaselineCount = 0;
+
+// The packaged BraveFoxHosts + legacyFox files are an authoritative baseline, not merely
+// an offline fallback. A stale fetched/cache generation must never make a domain present in
+// the extension package look clean to google.js/facebook.js/archive.js.
+const mergeBraveFoxCentralBundledBaseline = async () => {
+    if (braveFoxCentralBundledBaselineMerged) return braveFoxCentralBundledBaselineCount;
+
+    const mergedHosts = new Set(hostsListForClosure);
+    let bundledCount = 0;
+
+    for (const fallbackPath of ['lists/BraveFoxHosts', 'lists/legacyFox']) {
+        try {
+            const hosts = await fetchHostsFile(chrome.runtime.getURL(fallbackPath));
+            for (const host of Array.isArray(hosts) ? hosts : []) {
+                const normalized = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+                if (!normalized || isAllowlistedHostname(normalized) || isCompletelyExcludedHostname(normalized)) continue;
+                bundledCount++;
+                mergedHosts.add(normalized);
+            }
+        } catch (error) {
+            console.warn(`Central URL policy could not load bundled baseline ${fallbackPath}:`, error);
+        }
+    }
+
+    if (mergedHosts.size) hostsListForClosure = mergedHosts;
+    braveFoxCentralBundledBaselineCount = bundledCount;
+    braveFoxCentralBundledBaselineMerged = true;
+    return bundledCount;
+};
+
+// The MV3 service worker can receive a result-classification message before bootManager()
+// has restored the fetched hosts into memory. Restore persisted chunks on demand, then always
+// union the packaged baseline before returning a verdict.
+const ensureBraveFoxCentralHostsReady = async () => {
+    if (braveFoxCentralHostsReadyPromise) return braveFoxCentralHostsReadyPromise;
+
+    braveFoxCentralHostsReadyPromise = (async () => {
+        if (!hostsListForClosure.size) {
+            try {
+                const cachedHosts = await getAllHostsList();
+                if (Array.isArray(cachedHosts) && cachedHosts.length) {
+                    hostsListForClosure = new Set(cachedHosts);
+                }
+            } catch (error) {
+                console.warn('Central URL policy could not restore cached hosts:', error);
+            }
+        }
+
+        await mergeBraveFoxCentralBundledBaseline();
+        return hostsListForClosure.size;
+    })().finally(() => {
+        braveFoxCentralHostsReadyPromise = null;
+    });
+
+    return braveFoxCentralHostsReadyPromise;
+};
+
+// Match the Firefox Focus Master host semantics: a parent entry such as runway.com
+// also classifies www.runway.com / app.runway.com as blocked. Explicit allowlists are
+// still evaluated before this helper and therefore retain priority.
+const findBraveFoxCentralBlockedHost = (hostname) => {
+    let candidate = String(hostname || '').trim().toLowerCase().replace(/\.$/, '');
+    while (candidate) {
+        if (hostsListForClosure.has(candidate)) return candidate;
+        const dot = candidate.indexOf('.');
+        if (dot < 0) break;
+        candidate = candidate.slice(dot + 1);
+    }
+    return '';
+};
+
+const getBraveFoxCentralUrlPolicySnapshot = async () => {
+    await ensureBraveFoxCentralHostsReady();
+    // During cold start/update the in-memory policy can already include bundled
+    // or newly fetched hosts that have not landed in the chunked storage yet.
+    // Send only the missing entries to the portable Google checker, capped to
+    // avoid multi-megabyte runtime messages. A larger gap uses the safe bridge.
+    let bundledHostOverlay = [];
+    let bundledOverlayComplete = true;
+    try {
+        const stored = new Set(await getAllHostsList());
+        for (const host of hostsListForClosure) {
+            if (stored.has(host)) continue;
+            bundledHostOverlay.push(host);
+            if (bundledHostOverlay.length > 512) {
+                bundledHostOverlay = [];
+                bundledOverlayComplete = false;
+                break;
+            }
+        }
+    } catch (error) {
+        bundledHostOverlay = [];
+        bundledOverlayComplete = false;
+    }
+    if (bundledOverlayComplete) bundledHostOverlay.sort();
+    return {
+        allowedHosts: Array.from(new Set([
+            ...BRAVEFOX_COMPLETE_EXCLUSION_HOSTS,
+            ...allowedSites
+        ])),
+        allowedPathRules: BRAVEFOX_COMPLETE_EXCLUSION_PATH_RULES.map(rule => ({ ...rule })),
+        blockedSites: blockedSites.slice(),
+        blockedTLDs: blockedTLDs.slice(),
+        fetchedHostsCount: hostsListForClosure.size,
+        bundledHostsCount: braveFoxCentralBundledBaselineCount,
+        bundledHostOverlay,
+        bundledOverlayComplete
+    };
+};
+
+const classifyBraveFoxCentralUrl = async (value) => {
+    await ensureBraveFoxCentralHostsReady();
+    const raw = String(value || '').trim();
+    if (!raw) return { action: 'none', url: '', hostname: '' };
+
+    let parsed = null;
+    try {
+        parsed = new URL(raw);
+    } catch (_) {
+        try {
+            if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[\/:?#]|$)/i.test(raw)) {
+                parsed = new URL(`https://${raw}`);
+            }
+        } catch (_) {}
+    }
+
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+        return { action: 'none', url: raw, hostname: '' };
+    }
+
+    const href = parsed.href;
+    const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+
+    if (isBraveFoxCompletelyExcludedUrl(href)) {
+        return { action: 'allow', url: href, hostname, source: 'BRAVEFOX_COMPLETE_EXCLUSION_HOSTS' };
+    }
+
+    if (isAllowlistedHostname(hostname)) {
+        return { action: 'allow', url: href, hostname, source: 'allowedSites' };
+    }
+
+    const blockedReason = findBraveFoxBlockedUrlReason(href);
+    if (blockedReason) {
+        return { action: 'block', url: href, hostname, source: blockedReason.source,
+            blockedHost: blockedReason.source === 'fetched-hosts' ? blockedReason.match : undefined,
+            matchedEntry: blockedReason.match };
+    }
+
+    return { action: 'none', url: href, hostname, source: 'none' };
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === BRAVEFOX_CENTRAL_URL_POLICY_SNAPSHOT_TYPE) {
+        (async () => {
+            try {
+                sendResponse({ ok: true, snapshot: await getBraveFoxCentralUrlPolicySnapshot() });
+            } catch (error) {
+                sendResponse({ ok: false, error: error?.message || String(error) });
+            }
+        })();
+        return true;
+    }
+
+    if (message.type === BRAVEFOX_CENTRAL_URL_POLICY_CLASSIFY_TYPE) {
+        (async () => {
+            try {
+                const input = Array.isArray(message.urls) ? message.urls : [];
+                const urls = Array.from(new Set(input.map(value => String(value || '').trim()).filter(Boolean)))
+                    .slice(0, BRAVEFOX_CENTRAL_URL_POLICY_MAX_BATCH);
+                const verdicts = await Promise.all(urls.map(classifyBraveFoxCentralUrl));
+                sendResponse({
+                    ok: true,
+                    verdicts,
+                    fetchedHostsCount: hostsListForClosure.size,
+                    bundledHostsCount: braveFoxCentralBundledBaselineCount
+                });
+            } catch (error) {
+                sendResponse({ ok: false, error: error?.message || String(error), verdicts: [] });
+            }
+        })();
+        return true;
+    }
+
+    return false;
+});
+
+
+// === NEW: BraveFox System/Extensions page redirect helpers ===
+const EXT_PROTOCOLS = ['chrome', 'edge', 'brave', 'opera', 'vivaldi'];
+
+// Strategy: 'ttl' to tie bypass to 5-minute auth window, or 'window' for a tiny stabilization window
+const EXT_BYPASS_STRATEGY = 'ttl'; // 'ttl' | 'window'
+
+// One-shot stabilization window (used when EXT_BYPASS_STRATEGY === 'window')
+const BYPASS_WINDOW_MS = 1500;
+
+// 5-minute TTL for extension bypass when using 'ttl' strategy
+const BYPASS_TTL_MS = 300000;
+
+// Per-tab bypass map (tabId -> expiration timestamp)
+const UNLOCK_BYPASS_TABS = new Map();
+
+// NEW: Track the intercepted URL so we can seamlessly bounce them back after unlock
+const ORIGINAL_URLS = new Map(); 
+
+// v29.8.2: a successful system-page unlock authorizes the current browser
+// session for exactly five minutes, not merely the tab containing the prompt.
+// Store only a bounded expiry (never a password) so an extension update / MV3
+// worker restart cannot turn navigation to an extension detail page into a new gate.
+// The incognito window stays memory-only and does not inherit regular grants.
+const BRAVEFOX_SYSTEM_AUTH_LEASE_KEY = 'bravefoxSystemAuthLease_v1';
+const BRAVEFOX_SYSTEM_PENDING_KEY = 'bravefoxSystemAuthPending_v1';
+const BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY = 'bravefoxSystemIncognitoAuthLease_v1';
+const BRAVEFOX_SYSTEM_PENDING_TTL_MS = 2 * 60 * 1000;
+let bravefoxSystemLeaseExpiresAt = 0;
+let bravefoxSystemLeaseHydration = null;
+let bravefoxSystemIncognitoExpiresAt = 0;
+let bravefoxSystemAuthStartupReset = false;
+const bravefoxSystemRedirectPending = new Set();
+
+function bravefoxValidSystemLease(lease) {
+    const now = Date.now();
+    const issued = Number(lease?.issuedAt);
+    const expiry = Number(lease?.expiresAt);
+    return Number.isFinite(issued) && Number.isFinite(expiry) &&
+        issued > 0 && issued <= now && expiry > now &&
+        expiry <= issued + BYPASS_TTL_MS && issued >= now - BYPASS_TTL_MS;
+}
+
+async function bravefoxReadSystemLease() {
+    if (bravefoxSystemAuthStartupReset) return 0;
+    if (bravefoxSystemLeaseExpiresAt > Date.now()) return bravefoxSystemLeaseExpiresAt;
+    if (!bravefoxSystemLeaseHydration) {
+        bravefoxSystemLeaseHydration = (async () => {
+            try {
+                const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_AUTH_LEASE_KEY);
+                const lease = stored?.[BRAVEFOX_SYSTEM_AUTH_LEASE_KEY];
+                if (bravefoxValidSystemLease(lease) && !bravefoxSystemAuthStartupReset) {
+                    bravefoxSystemLeaseExpiresAt = lease.expiresAt;
+                    return lease.expiresAt;
+                }
+                if (lease) await chrome.storage.local.remove(BRAVEFOX_SYSTEM_AUTH_LEASE_KEY);
+            } catch (error) {
+                console.warn('BraveFox: could not restore system unlock:', error?.message || error);
+            }
+            return 0;
+        })().finally(() => { bravefoxSystemLeaseHydration = null; });
+    }
+    return bravefoxSystemLeaseHydration;
+}
+
+async function bravefoxHasSystemPageGrant(tabId, tab = null) {
+    if (bravefoxSystemAuthStartupReset) return false;
+    if (isBypassed(tabId)) return true;
+    try {
+        const current = tab || await chrome.tabs.get(tabId);
+        if (current?.incognito) {
+            if (bravefoxSystemIncognitoExpiresAt <= Date.now() && chrome.storage?.session) {
+                const stored = await chrome.storage.session.get(BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY);
+                const lease = stored?.[BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY];
+                if (bravefoxValidSystemLease(lease)) bravefoxSystemIncognitoExpiresAt = lease.expiresAt;
+            }
+            if (bravefoxSystemIncognitoExpiresAt > Date.now()) {
+                UNLOCK_BYPASS_TABS.set(tabId, bravefoxSystemIncognitoExpiresAt);
+                return true;
+            }
+            return false;
+        }
+        const expiry = await bravefoxReadSystemLease();
+        if (expiry > Date.now()) {
+            UNLOCK_BYPASS_TABS.set(tabId, expiry);
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+async function bravefoxRememberSystemReturn(tabId, url) {
+    ORIGINAL_URLS.set(tabId, url);
+    try {
+        const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_PENDING_KEY);
+        const entries = stored?.[BRAVEFOX_SYSTEM_PENDING_KEY] || {};
+        const now = Date.now();
+        for (const [key, record] of Object.entries(entries)) {
+            if (Number(record?.expiresAt) <= now) delete entries[key];
+        }
+        entries[String(tabId)] = { url, expiresAt: now + BRAVEFOX_SYSTEM_PENDING_TTL_MS };
+        await chrome.storage.local.set({ [BRAVEFOX_SYSTEM_PENDING_KEY]: entries });
+    } catch (_) {} // The in-memory return URL still works without persistence.
+}
+
+async function bravefoxTakeSystemReturn(tabId) {
+    let url = ORIGINAL_URLS.get(tabId) || '';
+    ORIGINAL_URLS.delete(tabId);
+    try {
+        const stored = await chrome.storage.local.get(BRAVEFOX_SYSTEM_PENDING_KEY);
+        const entries = stored?.[BRAVEFOX_SYSTEM_PENDING_KEY] || {};
+        const record = entries[String(tabId)];
+        delete entries[String(tabId)];
+        await chrome.storage.local.set({ [BRAVEFOX_SYSTEM_PENDING_KEY]: entries });
+        if (!url && Number(record?.expiresAt) > Date.now()) url = record.url || '';
+    } catch (_) {}
+    return isProtectedSystemPageUrl(url) ? url : 'chrome://extensions/';
+}
+
+async function bravefoxClearSystemLeaseOnBrowserStartup() {
+    bravefoxSystemAuthStartupReset = true;
+    bravefoxSystemLeaseExpiresAt = 0;
+    bravefoxSystemIncognitoExpiresAt = 0;
+    UNLOCK_BYPASS_TABS.clear();
+    try {
+        await chrome.storage.local.remove([
+            BRAVEFOX_SYSTEM_AUTH_LEASE_KEY, BRAVEFOX_SYSTEM_PENDING_KEY,
+            BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY
+        ]);
+        await chrome.storage.session?.remove(BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY);
+    } catch (_) {}
+    bravefoxSystemAuthStartupReset = false;
+    await scanAndRedirectProtectedTabs();
+}
+
+function bravefoxIsSystemPasswordSender(sender) {
+    try {
+        if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender?.tab?.id) ||
+            (sender.frameId !== undefined && sender.frameId !== 0)) return false;
+        const url = new URL(String(sender.url || sender.tab.url || ''));
+        return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id &&
+            url.pathname === '/html/password-protected.html' &&
+            !url.searchParams.has('target') && !url.searchParams.has('request');
+    } catch (_) { return false; }
+}
+
+function isBypassed(tabId) {
+  if (tabId == null) return false;
+  const exp = UNLOCK_BYPASS_TABS.get(tabId);
+  if (!exp) return false;
+  const ok = Date.now() <= exp;
+  if (!ok) {
+    UNLOCK_BYPASS_TABS.delete(tabId);
+  }
+  return ok;
+}
+
+function grantBypass(tabId) {
+  try {
+    const duration = (EXT_BYPASS_STRATEGY === 'ttl') ? BYPASS_TTL_MS : BYPASS_WINDOW_MS;
+    const expiresAt = Date.now() + duration;
+    UNLOCK_BYPASS_TABS.set(tabId, expiresAt);
+    // A prior timer must never remove a subsequently renewed unlock.
+    const cleanupId = setTimeout(() => {
+      if (UNLOCK_BYPASS_TABS.get(tabId) === expiresAt) UNLOCK_BYPASS_TABS.delete(tabId);
+    }, duration + 1000);
+    resourceTracker.addTimeout(cleanupId);
+    return expiresAt;
+  } catch (e) {
+    console.warn('Failed to grant bypass:', e?.message || e);
+  }
+}
+
+// NEW: Detect browser extensions OR Dev Console pages we want to protect via redirection
+function isProtectedSystemPageUrl(url) {
+    if (!url || typeof url !== 'string' || isBraveFoxCompletelyExcludedUrl(url)) return false;
+    try {
+        const lower = url.toLowerCase();
+        
+        // 1. Chrome extensions pages
+        const isExt = EXT_PROTOCOLS.some(proto =>
+            lower.startsWith(`${proto}://extensions`) ||
+            lower.startsWith(`${proto}://settings/extensions`)
+        );
+        
+        // 2. Chrome Web Store Developer Console
+        const isDevConsole = lower.startsWith('https://chrome.google.com/webstore/devconsole') ||
+                             lower.startsWith('https://chromewebstore.google.com/developer');
+                             
+        return isExt || isDevConsole;
+    } catch {
+        return false;
+    }
+}
+
+// Get the internal protected page URL
+function getProtectedPageUrl() {
+    try {
+        return chrome.runtime.getURL(EXT_PAGE);
+    } catch {
+        return EXT_PAGE;
+    }
+}
+
+// Attempt to redirect a tab to the protected internal page and remember where they wanted to go
+async function redirectToProtectedSystemPage(tabId, originalUrl) {
+    if (!Number.isInteger(tabId) || !isProtectedSystemPageUrl(originalUrl) ||
+        bravefoxSystemRedirectPending.has(tabId)) return false;
+    bravefoxSystemRedirectPending.add(tabId);
+    try {
+        // Grant restoration is asynchronous on the first event after an update.
+        // Recheck before redirecting so a valid lease never produces a flash.
+        const tab = await chrome.tabs.get(tabId);
+        if (await bravefoxHasSystemPageGrant(tabId, tab)) return false;
+        const current = await chrome.tabs.get(tabId);
+        const activeUrl = current?.pendingUrl || current?.url || '';
+        if (!isProtectedSystemPageUrl(activeUrl)) return false;
+        // Keep the latest details-page URL, not an older onUpdated event URL.
+        await bravefoxRememberSystemReturn(tabId, activeUrl);
+        if (await bravefoxHasSystemPageGrant(tabId, current)) return false;
+        await chrome.tabs.update(tabId, { url: getProtectedPageUrl() });
+        return true;
+    } catch (e) {
+        console.warn('BraveFox: system page gate failed:', e?.message || e);
+        return false;
+    } finally {
+        bravefoxSystemRedirectPending.delete(tabId);
+    }
+}
+
+// Scan all tabs and redirect any open system/settings pages
+async function scanAndRedirectProtectedTabs() {
+    try {
+        const tabs = await chrome.tabs.query({});
+        for (const t of tabs) {
+            if (t && t.id != null && t.url && isProtectedSystemPageUrl(t.url) &&
+                !(await bravefoxHasSystemPageGrant(t.id, t))) {
+                await redirectToProtectedSystemPage(t.id, t.url);
+            }
+        }
+    } catch (e) {
+        console.warn('Failed to scan and redirect protected tabs:', e?.message || e);
+    }
+}
+// === END NEW HELPERS ===
+
+// Enhanced tab closure with retry mechanism and better error handling
+const closeBlockedTabImmediately = async (url, tabId, maxRetries = 3) => {
+    console.log(`Attempting to close blocked tab ${tabId}: ${url}`);
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            // Verify tab still exists before trying to close
+            const tab = await chrome.tabs.get(tabId).catch(() => null);
+            if (!tab) {
+                console.log(`Tab ${tabId} no longer exists`);
+                return true; // Consider this a success
+            }
+            
+            // Check if tab is in a valid state for manipulation
+            if (tab.status === 'unloaded') {
+                console.log(`Tab ${tabId} is unloaded, skipping close attempt`);
+                return false;
+            }
+            
+            // Close the tab immediately
+            await chrome.tabs.remove(tabId);
+            console.log(`Successfully closed blocked tab ${tabId} on attempt ${attempt}`);
+
+            // Clean up history after a short delay
+            const historyTimeoutId = setTimeout(async () => {
+                try {
+                    await chrome.history.deleteUrl({ url: url });
+                    console.log(`Deleted URL ${url} from history.`);
+                } catch (historyError) {
+                    console.warn(`Failed to delete URL ${url} from history:`, historyError);
+                }
+            }, 100);
+            resourceTracker.addTimeout(historyTimeoutId);
+            
+            return true;
+            
+        } catch (error) {
+            const errorMessage = error.message || '';
+            
+            if (errorMessage.includes("No tab with id")) {
+                console.warn(`Tab ${tabId} was already closed or is invalid.`);
+                return true; // Consider this a success
+            } else if (errorMessage.includes("user may be dragging")) {
+                console.warn(`Tab ${tabId} cannot be closed (attempt ${attempt}/${maxRetries}): user may be dragging`);
+                
+                if (attempt < maxRetries) {
+                    // Wait with exponential backoff before retry
+                    const delay = Math.min(100 * Math.pow(2, attempt - 1), 1000);
+                    console.log(`Waiting ${delay}ms before retry...`);
+                    await new Promise(resolve => {
+                        const timeoutId = setTimeout(resolve, delay);
+                        resourceTracker.addTimeout(timeoutId);
+                    });
+                    continue;
+                } else {
+                    console.error(`Failed to close tab ${tabId} after ${maxRetries} attempts: ${errorMessage}`);
+                    // Try alternative approach - navigate to about:blank
+                    try {
+                        await chrome.tabs.update(tabId, { url: 'about:blank' });
+                        console.log(`Mapsd tab ${tabId} to about:blank as fallback`);
+                        return true;
+                    } catch (navError) {
+                        console.error(`Failed to navigate tab ${tabId} to about:blank:`, navError);
+                        return false;
+                    }
+                }
+            } else {
+                console.error(`Error closing tab ${tabId} (attempt ${attempt}/${maxRetries}):`, error);
+                if (attempt === maxRetries) {
+                    return false;
+                }
+                // Wait before retry for other errors too
+                await new Promise(resolve => {
+                    const timeoutId = setTimeout(resolve, 50);
+                    resourceTracker.addTimeout(timeoutId);
+                });
+            }
+        }
+    }
+    
+    return false;
+};
+
+// Enhanced event listener registration with error handling and cleanup tracking
+const registerEventListeners = () => {
+    try {
+        const processAutoClearNavigation = (details, source) => {
+            try {
+                if (!details || details.frameId !== 0 || !details.url) return;
+
+                // Do NOT apply BraveFox's complete-exclusion policy here. History cleanup
+                // is a separate opt-in policy, and chatgpt.com/openai.com are deliberately
+                // both trusted for blocking and auto-cleared from history.
+                trackHistoryAutoClearTab(details.tabId, details.url);
+                if (isHistoryAutoClearUrl(details.url)) {
+                    scheduleAutoClearHistoryUrl(details.url, source);
+                }
+            } catch (error) {
+                console.error(`Error in ${source} history cleanup:`, error);
+            }
+        };
+
+        // history.onVisited fires before the page is fully loaded, so scheduleAutoClearHistoryUrl
+        // performs an immediate delete plus a delayed retry after Chromium finishes committing it.
+        if (chrome.history && chrome.history.onVisited) {
+            const onHistoryVisitedHandler = (historyItem) => {
+                try {
+                    if (historyItem && isHistoryAutoClearUrl(historyItem.url)) {
+                        scheduleAutoClearHistoryUrl(historyItem.url, 'history.onVisited');
+                    }
+                } catch (error) {
+                    console.error('Error in history onVisited listener:', error);
+                }
+            };
+            chrome.history.onVisited.addListener(onHistoryVisitedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.history.onVisited.removeListener(onHistoryVisitedHandler);
+            });
+        }
+
+        // Listen for tab creation and immediately close/redirect if matched (BEFORE any loading starts)
+        if (chrome.tabs.onCreated) {
+            const onCreatedHandler = (tab) => {
+                try {
+                    const tabUrl = tab?.url || tab?.pendingUrl || '';
+                    if (typeof tab?.id === 'number' && tabUrl) {
+                        trackHistoryAutoClearTab(tab.id, tabUrl, tab.windowId);
+                        if (isHistoryAutoClearUrl(tabUrl)) {
+                            scheduleAutoClearHistoryUrl(tabUrl, 'tabs.onCreated');
+                        }
+                    }
+
+                    if (tabUrl && isBraveFoxCompletelyExcludedUrl(tabUrl)) return;
+                    // Redirect protected system pages immediately on tab creation
+                    if (tabUrl && isProtectedSystemPageUrl(tabUrl)) {
+                        if (isBypassed(tab.id)) {
+                            return; // allow during bypass
+                        }
+                        redirectToProtectedSystemPage(tab.id, tabUrl);
+                        return; // nothing else to do for this tab
+                    }
+
+                    if (tabUrl && isBlockedUrl(tabUrl) && !closedTabs.has(tab.id)) {
+                        closedTabs.add(tab.id);
+                        console.log(`New tab created with blocked URL, closing immediately: ${tabUrl}`);
+                        closeBlockedTabImmediately(tabUrl, tab.id);
+                    }
+                } catch (error) {
+                    console.error('Error in onCreated listener:', error);
+                }
+            };
+            chrome.tabs.onCreated.addListener(onCreatedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.tabs.onCreated.removeListener(onCreatedHandler);
+            });
+        }
+
+        // Listen for navigation events and close/redirect immediately (BEFORE loading starts)
+        if (chrome.tabs.onUpdated) {
+            const onUpdatedHandler = (tabId, changeInfo, tab) => {
+                try {
+                    const braveFoxCandidateUrl = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+
+                    if (braveFoxCandidateUrl) {
+                        trackHistoryAutoClearTab(tabId, braveFoxCandidateUrl, tab?.windowId);
+                    }
+
+                    // History auto-clear must run before the complete-exclusion early return.
+                    // ChatGPT/OpenAI are intentionally trusted sites *and* history-auto-clear sites.
+                    if (changeInfo.url && isHistoryAutoClearUrl(changeInfo.url)) {
+                        scheduleAutoClearHistoryUrl(changeInfo.url, 'tabs.onUpdated');
+                    }
+
+                    // Web Store detail names cannot be read via a Chrome content
+                    // script; tabs.onUpdated exposes the document title instead.
+                    if (braveFoxIsChromeWebStoreUrl(braveFoxCandidateUrl) &&
+                        (typeof changeInfo?.title === 'string' || changeInfo?.status === 'complete')) {
+                        void braveFoxCloseWebStoreTitleMatch(tabId);
+                    }
+
+                    if (isBraveFoxCompletelyExcludedUrl(braveFoxCandidateUrl)) return;
+                    // Redirect when a tab navigates to a protected system page
+                    const urlIsProtected = changeInfo.url ? isProtectedSystemPageUrl(changeInfo.url) : (tab && tab.url && isProtectedSystemPageUrl(tab.url));
+                    if (urlIsProtected) {
+                        if (isBypassed(tabId)) {
+                            return; // allow during bypass
+                        }
+                        const urlToProtect = changeInfo.url || (tab && tab.url);
+                        redirectToProtectedSystemPage(tabId, urlToProtect);
+                        return;
+                    }
+
+                    // Existing blocking logic
+                    if (changeInfo.url && isBlockedUrl(changeInfo.url) && !closedTabs.has(tabId)) {
+                        closedTabs.add(tabId);
+                        console.log(`Tab navigation to blocked URL detected, closing immediately: ${changeInfo.url}`);
+                        closeBlockedTabImmediately(changeInfo.url, tabId);
+                    }
+
+                    // Handle incognito mode updates
+                    if (changeInfo.status === 'loading') {
+                        updateIncognitoBlockingRules();
+                    }
+
+                    // Handle history cleanup for blocked URLs
+                    if (changeInfo.url && isBlockedUrl(changeInfo.url)) {
+                        console.log(`Detected blocked site: ${changeInfo.url}, initiating cleanup...`);
+                        cleanUpTabHistory(tabId, changeInfo.url);
+                    }
+                } catch (error) {
+                    console.error('Error in onUpdated listener:', error);
+                }
+            };
+            chrome.tabs.onUpdated.addListener(onUpdatedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
+            });
+        }
+
+        // Fallback: Listen for navigation start (webNavigation API for even earlier interception)
+        if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+            const onBeforeNavigateHandler = (details) => {
+                try {
+                    if (details?.frameId === 0 && details.url) {
+                        trackHistoryAutoClearTab(details.tabId, details.url);
+                    }
+                    if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
+                    if (details.frameId === 0) {
+                        // Redirect earliest possible for protected system pages
+                        if (isProtectedSystemPageUrl(details.url)) {
+                            if (isBypassed(details.tabId)) {
+                                return; // allow during bypass
+                            }
+                            redirectToProtectedSystemPage(details.tabId, details.url);
+                            return;
+                        }
+                        // Existing block
+                        if (isBlockedUrl(details.url) && !closedTabs.has(details.tabId)) {
+                            closedTabs.add(details.tabId);
+                            console.log(`WebNavigation: Blocking navigation before it starts: ${details.url}`);
+                            closeBlockedTabImmediately(details.url, details.tabId);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error in onBeforeNavigate listener:', error);
+                }
+            };
+            chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigateHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigateHandler);
+            });
+        }
+
+        // Traditional navigation commit: history is much more likely to be fully registered here.
+        if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
+            const onCommittedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onCommitted');
+            chrome.webNavigation.onCommitted.addListener(onCommittedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onCommitted.removeListener(onCommittedHandler);
+            });
+        }
+
+        // ChatGPT is a long-lived SPA. pushState/replaceState navigations land here even when
+        // tabs.onUpdated/history.onVisited do not behave like a traditional page navigation.
+        if (chrome.webNavigation && chrome.webNavigation.onHistoryStateUpdated) {
+            const onHistoryStateUpdatedHandler = (details) => {
+                processAutoClearNavigation(details, 'webNavigation.onHistoryStateUpdated');
+                // The Web Store uses History API search navigation (no new document).
+                if (details?.frameId !== 0 || !Number.isInteger(details.tabId) ||
+                    details.tabId < 0 || !braveFoxWebStoreBlockedReason(details.url) ||
+                    closedTabs.has(details.tabId)) return;
+                closedTabs.add(details.tabId);
+                void closeBlockedTabImmediately(details.url, details.tabId);
+            };
+            chrome.webNavigation.onHistoryStateUpdated.addListener(onHistoryStateUpdatedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onHistoryStateUpdated.removeListener(onHistoryStateUpdatedHandler);
+            });
+        }
+
+        // Hash-only transitions (including settings-style routes) get their own webNavigation event.
+        if (chrome.webNavigation && chrome.webNavigation.onReferenceFragmentUpdated) {
+            const onReferenceFragmentUpdatedHandler = (details) => processAutoClearNavigation(details, 'webNavigation.onReferenceFragmentUpdated');
+            chrome.webNavigation.onReferenceFragmentUpdated.addListener(onReferenceFragmentUpdatedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onReferenceFragmentUpdated.removeListener(onReferenceFragmentUpdatedHandler);
+            });
+        }
+
+        // Completion is another post-commit safety net and keeps the protected-page logging intact.
+        if (chrome.webNavigation && chrome.webNavigation.onCompleted) {
+            const onCompletedHandler = (details) => {
+                try {
+                    processAutoClearNavigation(details, 'webNavigation.onCompleted');
+                    if (details && isBraveFoxCompletelyExcludedUrl(details.url)) return;
+
+                    if (details.frameId === 0 && isProtectedSystemPageUrl(details.url)) {
+                        console.log(`Protected page completed for tab ${details.tabId}. Bypass active: ${isBypassed(details.tabId)}`);
+                    }
+                } catch (error) {
+                    console.error('Error in onCompleted listener:', error);
+                }
+            };
+            chrome.webNavigation.onCompleted.addListener(onCompletedHandler);
+            resourceTracker.addEventCleanup(() => {
+                chrome.webNavigation.onCompleted.removeListener(onCompletedHandler);
+            });
+        }
+
+        // Listen for window creation and removal to handle incognito mode and PWA teardown.
+        if (chrome.windows.onCreated) {
+            const onWindowCreatedHandler = () => {
+                try {
+                    updateIncognitoBlockingRules();
+                    scanAndRedirectProtectedTabs();
+                } catch (error) {
+                    console.error('Error in window onCreated listener:', error);
+                }
+            };
+            chrome.windows.onCreated.addListener(onWindowCreatedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.windows.onCreated.removeListener(onWindowCreatedHandler);
+            });
+        }
+
+        if (chrome.windows.onRemoved) {
+            const onWindowRemovedHandler = (windowId) => {
+                try {
+                    // App/PWA windows are still Chromium windows containing tabs. If we know an
+                    // auto-clear tab lived here, schedule its final domain purge immediately.
+                    const domainsToPurge = new Set();
+                    for (const tracked of historyAutoClearTabs.values()) {
+                        if (tracked?.windowId === windowId && tracked.domain) domainsToPurge.add(tracked.domain);
+                    }
+                    for (const domain of domainsToPurge) {
+                        scheduleAutoClearHistoryDomainPurge(domain, 'windows.onRemoved');
+                    }
+
+                    updateIncognitoBlockingRules();
+                } catch (error) {
+                    console.error('Error in window onRemoved listener:', error);
+                }
+            };
+            chrome.windows.onRemoved.addListener(onWindowRemovedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.windows.onRemoved.removeListener(onWindowRemovedHandler);
+            });
+        }
+
+        // Listen for tab removal to handle cleanup. This is the authoritative PWA/session-end
+        // hook because onRemoved does not provide the URL, so we use the tracked last URL/domain.
+        if (chrome.tabs.onRemoved) {
+            const onTabRemovedHandler = (tabId, removeInfo) => {
+                try {
+                    // Resolve the record asynchronously as well, because a Manifest V3 worker may
+                    // have restarted after the PWA opened and lost its in-memory Map.
+                    void (async () => {
+                        const tracked = await getTrackedHistoryAutoClearTab(tabId);
+                        historyAutoClearTabs.delete(tabId);
+                        removePersistedHistoryAutoClearTab(tabId);
+                        if (tracked?.domain) {
+                            scheduleAutoClearHistoryDomainPurge(tracked.domain, 'tabs.onRemoved');
+                        }
+                    })();
+
+                    if (closedTabs.has(tabId)) {
+                        closedTabs.delete(tabId);
+                        console.log(`Removed tab ${tabId} from closedTabs set.`);
+                    }
+                    // Clear any bypass and original URLs for closed tabs
+                    if (UNLOCK_BYPASS_TABS.has(tabId)) UNLOCK_BYPASS_TABS.delete(tabId);
+                    if (ORIGINAL_URLS.has(tabId)) ORIGINAL_URLS.delete(tabId);
+
+                    updateIncognitoBlockingRules();
+                } catch (error) {
+                    console.error('Error in onRemoved listener:', error);
+                }
+            };
+            chrome.tabs.onRemoved.addListener(onTabRemovedHandler);
+
+            resourceTracker.addEventCleanup(() => {
+                chrome.tabs.onRemoved.removeListener(onTabRemovedHandler);
+            });
+        }
+
+        if (chrome.alarms?.onAlarm) {
+            const onHistoryAutoClearAlarm = (alarm) => {
+                if (alarm?.name !== HISTORY_AUTO_CLEAR_SWEEP_ALARM) return;
+                void runCriticalHistoryAutoClearSweep('chrome.alarms safety sweep');
+            };
+            chrome.alarms.onAlarm.addListener(onHistoryAutoClearAlarm);
+            resourceTracker.addEventCleanup(() => {
+                chrome.alarms.onAlarm.removeListener(onHistoryAutoClearAlarm);
+            });
+            ensureHistoryAutoClearSweepAlarm();
+        }
+
+        console.log('Event listeners registered successfully');
+    } catch (error) {
+        console.error('Error registering event listeners:', error);
+    }
+};
+
+// Function to clean up history and remove from session restore without closing the tab
+const cleanUpTabHistory = async (tabId, url) => {
+    try {
+        console.log(`Attempting to clean history and remove session data for: ${url}`);
+
+        // Use Map for better memory management instead of WeakMap for simple timeout tracking
+        const cleanupTimeouts = new Map();
+
+        // Delay to ensure session data registers (since history might take a moment to update)
+        const timeoutId = setTimeout(async () => {
+            try {
+                await chrome.history.deleteUrl({ url });
+                console.log(`History cleared for: ${url}`);
+            } catch (error) {
+                console.error("Error deleting history:", error);
+            }
+
+            // Log that session data is cleaned (no direct API to remove from "Recently Closed")
+            console.log(`Cleaned session for: ${url}`);
+            
+            // Clean up timeout reference
+            cleanupTimeouts.delete(url);
+
+        }, 1500); // 1.5-second delay to ensure session entry exists
+
+        cleanupTimeouts.set(url, timeoutId);
+        resourceTracker.addTimeout(timeoutId);
+
+    } catch (error) {
+        console.error("Error cleaning up tab history:", error);
+    }
+};
+
+// NEW: messaging to handle unlock + auto-routing
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  try {
+    if (!message || typeof message !== 'object') return;
+
+    if (message.type === 'BRAVEFOX_EXT_UNLOCK') {
+      if (!bravefoxIsSystemPasswordSender(sender)) {
+        sendResponse?.({ ok: false, error: 'Unauthorized system unlock sender.' });
+        return true;
+      }
+      (async () => {
+        try {
+          const tabId = sender.tab.id;
+          const expiresAt = grantBypass(tabId);
+          if (!Number.isFinite(expiresAt)) throw new Error('Could not grant system unlock.');
+          if (sender.tab.incognito) {
+            bravefoxSystemIncognitoExpiresAt = expiresAt;
+            // Split incognito can survive an MV3 worker sleep, but never carry
+            // its unlock into the regular profile or a new browser session.
+            try {
+              await chrome.storage.session?.set({
+                [BRAVEFOX_SYSTEM_INCOGNITO_LEASE_KEY]: { issuedAt: Date.now(), expiresAt }
+              });
+            } catch (_) {}
+          } else {
+            const issuedAt = Date.now();
+            bravefoxSystemLeaseExpiresAt = expiresAt;
+            await chrome.storage.local.set({
+              [BRAVEFOX_SYSTEM_AUTH_LEASE_KEY]: { issuedAt, expiresAt }
+            });
+          }
+          sendResponse?.({ ok: true, expiresAt, ttlMs: BYPASS_TTL_MS });
+        } catch (error) {
+          UNLOCK_BYPASS_TABS.delete(sender.tab.id);
+          bravefoxSystemLeaseExpiresAt = 0;
+          sendResponse?.({ ok: false, error: error?.message || 'Could not save system unlock.' });
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'BRAVEFOX_GO_TO_EXTENSIONS') {
+      if (!bravefoxIsSystemPasswordSender(sender)) {
+        sendResponse?.({ ok: false, error: 'Unauthorized system page navigation.' });
+        return true;
+      }
+      (async () => {
+        try {
+          const tabId = sender.tab.id;
+          if (!(await bravefoxHasSystemPageGrant(tabId, sender.tab))) {
+            sendResponse?.({ ok: false, error: 'System page unlock expired.' });
+            return;
+          }
+          const targetUrl = await bravefoxTakeSystemReturn(tabId);
+          await chrome.tabs.update(tabId, { url: targetUrl });
+          sendResponse?.({ ok: true });
+        } catch (error) {
+          sendResponse?.({ ok: false, error: error?.message || 'Could not open system page.' });
+        }
+      })();
+      return true;
+    }
+  } catch (e) {
+    try { sendResponse?.({ ok: false, error: e?.message || String(e) }); } catch {}
+    return true;
+  }
+});
+
+
+// === BraveFox top-level web/action password bridge — 2026-08-21 =============
+// Web password gates no longer embed the internal password page in an iframe.
+// The background owns the tab navigation to the extension page and only returns
+// the tab after that top-level page approves the request.
+const BRAVEFOX_WEB_AUTH_STATE_KEY = 'bravefoxWebAuthState_v1';
+const BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY = 'bravefoxWebApprovedPageGrants_v1';
+const BRAVEFOX_WEB_AUTH_REQUEST_TTL_MS = 2 * 60 * 1000;
+const BRAVEFOX_WEB_PAGE_GRANT_TTL_MS = 5 * 60 * 1000;
+const BRAVEFOX_WEB_ACTION_GRANT_TTL_MS = 60 * 1000;
+
+// Main Copilot and Gemini page gates are authorized for the current extension/browser
+// session after one successful password. Sensitive in-page actions remain separate.
+const BRAVEFOX_WEB_SESSION_PAGE_SCOPES = Object.freeze({
+    GITHUB_COPILOT: 'github-copilot',
+    GEMINI: 'gemini-google',
+    WISEOLDMAN: 'wiseoldman-net'
+});
+
+// Gemini Saved info is intentionally excluded from the normal Gemini session grant.
+// Each entry receives one single-use page grant after a fresh password challenge.
+const BRAVEFOX_WEB_ONE_TIME_PAGE_SCOPES = Object.freeze({
+    GEMINI_SAVED_INFO: 'gemini-saved-info'
+});
+
+function bravefoxNewWebAuthRequestId() {
+    try {
+        if (globalThis.crypto?.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+    } catch (_) {}
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function bravefoxNormalizeWebGateUrl(rawUrl) {
+    try {
+        const url = new URL(String(rawUrl || ''));
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+        return url.href;
+    } catch (_) {
+        return '';
+    }
+}
+
+function bravefoxWebGateHost(rawUrl) {
+    try {
+        return new URL(String(rawUrl || '')).hostname.toLowerCase();
+    } catch (_) {
+        return '';
+    }
+}
+
+function bravefoxWebOneTimePageScope(rawUrl) {
+    try {
+        const url = new URL(String(rawUrl || ''));
+        const host = url.hostname.toLowerCase();
+        const path = (url.pathname || '/').replace(/\/+$/, '') || '/';
+
+        if (host === 'gemini.google.com' && (
+            path === '/saved-info' ||
+            path.startsWith('/saved-info/')
+        )) {
+            return BRAVEFOX_WEB_ONE_TIME_PAGE_SCOPES.GEMINI_SAVED_INFO;
+        if (path === '/gem/7b575190249c' || path.startsWith('/gem/7b575190249c/')) {
+            return 'gemini-gem-7b575190249c';
+        }
+        }
+    } catch (_) {}
+
+    return '';
+}
+
+function bravefoxWebSessionPageScope(rawUrl) {
+    try {
+        const url = new URL(String(rawUrl || ''));
+        const host = url.hostname.toLowerCase();
+        const path = url.pathname || '/';
+
+        if (host === 'gemini.google.com') {
+            if (bravefoxWebOneTimePageScope(rawUrl)) return '';
+            return BRAVEFOX_WEB_SESSION_PAGE_SCOPES.GEMINI;
+        }
+
+        if (host === 'github.com' && (
+            /^\/copilot(?:\/|$)/i.test(path) ||
+            /^\/features\/copilot(?:\/|$)/i.test(path)
+        )) {
+            return BRAVEFOX_WEB_SESSION_PAGE_SCOPES.GITHUB_COPILOT;
+        }
+
+        if (host === 'wiseoldman.net' || host === 'www.wiseoldman.net') {
+            return BRAVEFOX_WEB_SESSION_PAGE_SCOPES.WISEOLDMAN;
+        }
+    } catch (_) {}
+
+    return '';
+}
+
+function bravefoxWebPageGrantKey(tabId, rawUrl) {
+    const oneTimeScope = bravefoxWebOneTimePageScope(rawUrl);
+    if (oneTimeScope) {
+        return Number.isInteger(tabId) ? `one-time:${tabId}:${oneTimeScope}` : '';
+    }
+
+    const sessionScope = bravefoxWebSessionPageScope(rawUrl);
+    if (sessionScope) return `session:${sessionScope}`;
+
+    const host = bravefoxWebGateHost(rawUrl);
+    return Number.isInteger(tabId) && host ? `${tabId}:${host}` : '';
+}
+
+function bravefoxWebPageGrantIsActive(grant) {
+    if (!grant || typeof grant !== 'object') return false;
+    if (grant.mode === 'session') return true;
+    return Number(grant.expiresAt) > Date.now();
+}
+
+function bravefoxWebActionGrantKey(tabId, rawUrl, actionKey) {
+    const host = bravefoxWebGateHost(rawUrl);
+    const action = String(actionKey || '').trim().toLowerCase().slice(0, 160);
+    return Number.isInteger(tabId) && host && action ? `${tabId}:${host}:${action}` : '';
+}
+
+// Only already-approved, reusable web PAGE grants can survive an extension
+// upgrade. Never mirror pending requests, action grants, one-time grants, or
+// any ChatGPT sensitive-route grants to durable storage.
+function bravefoxWebApprovedReusableGrants(grants) {
+    const allowed = {};
+    const now = Date.now();
+    const sessionScopes = new Set(Object.values(BRAVEFOX_WEB_SESSION_PAGE_SCOPES));
+    for (const [key, grant] of Object.entries(grants || {})) {
+        if (!grant || typeof grant !== 'object') continue;
+        if (grant.mode === 'session' && sessionScopes.has(grant.scope) &&
+            key === `session:${grant.scope}` &&
+            Number(grant.grantedAt) > 0 && Number(grant.grantedAt) <= now) {
+            allowed[key] = grant;
+        } else if (grant.mode === 'timed' && /^\d+:[a-z0-9.-]+$/.test(key) &&
+            Number(grant.grantedAt) > 0 && Number(grant.grantedAt) <= now &&
+            Number(grant.expiresAt) > now &&
+            Number(grant.expiresAt) <= Number(grant.grantedAt) + BRAVEFOX_WEB_PAGE_GRANT_TTL_MS) {
+            allowed[key] = grant;
+        }
+    }
+    return allowed;
+}
+
+async function bravefoxLoadWebAuthState() {
+    const empty = { requests: {}, pageGrants: {}, actionGrants: {} };
+    try {
+        if (!chrome.storage?.session) return empty;
+        const [stored, backup] = await Promise.all([
+            chrome.storage.session.get([BRAVEFOX_WEB_AUTH_STATE_KEY]),
+            chrome.storage.local.get([BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY])
+        ]);
+        const state = stored?.[BRAVEFOX_WEB_AUTH_STATE_KEY];
+        const pageGrants = state?.pageGrants && typeof state.pageGrants === 'object' ? state.pageGrants : {};
+        if (!bravefoxSystemAuthStartupReset) {
+            const restored = bravefoxWebApprovedReusableGrants(backup?.[BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY]);
+            for (const [key, grant] of Object.entries(restored)) {
+                if (!pageGrants[key]) pageGrants[key] = grant;
+            }
+        }
+        return {
+            requests: state?.requests && typeof state.requests === 'object' ? state.requests : {},
+            pageGrants,
+            actionGrants: state?.actionGrants && typeof state.actionGrants === 'object' ? state.actionGrants : {}
+        };
+    } catch (_) { return empty; }
+}
+
+async function bravefoxSaveWebAuthState(state) {
+    try {
+        if (!chrome.storage?.session) return;
+        await chrome.storage.session.set({
+            [BRAVEFOX_WEB_AUTH_STATE_KEY]: {
+                requests: state?.requests || {},
+                pageGrants: state?.pageGrants || {},
+                actionGrants: state?.actionGrants || {}
+            }
+        });
+        await chrome.storage.local.set({
+            [BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY]: bravefoxWebApprovedReusableGrants(state?.pageGrants)
+        });
+    } catch (_) {}
+}
+
+function bravefoxPruneWebAuthState(state) {
+    const now = Date.now();
+
+    for (const [id, request] of Object.entries(state.requests || {})) {
+        if (!request || Number(request.expiresAt) <= now) delete state.requests[id];
+    }
+
+    for (const [key, grant] of Object.entries(state.pageGrants || {})) {
+        if (!grant || typeof grant !== 'object') {
+            delete state.pageGrants[key];
+            continue;
+        }
+        if (grant.mode === 'session') continue;
+        if (Number(grant.expiresAt) <= now) delete state.pageGrants[key];
+    }
+
+    for (const [key, grant] of Object.entries(state.actionGrants || {})) {
+        if (!grant || Number(grant.expiresAt) <= now) delete state.actionGrants[key];
+    }
+
+    return state;
+}
+
+function bravefoxIsWebPasswordPage(sender, requestId) {
+    try {
+        if (sender?.id !== chrome.runtime.id) return false;
+        const url = new URL(String(sender?.url || sender?.tab?.url || ''));
+        return url.protocol === 'chrome-extension:' &&
+            url.host === chrome.runtime.id &&
+            url.pathname === '/html/password-protected.html' &&
+            url.searchParams.get('target') === 'web' &&
+            (!requestId || url.searchParams.get('request') === requestId);
+    } catch (_) {
+        return false;
+    }
+}
+
+function bravefoxFindPendingWebAuthRequest(state, kind, tabId, returnUrl, actionKey = '') {
+    for (const request of Object.values(state.requests || {})) {
+        if (!request || request.kind !== kind || request.tabId !== tabId || request.returnUrl !== returnUrl) continue;
+        if (kind === 'action' && request.actionKey !== actionKey) continue;
+        if (Number(request.expiresAt) <= Date.now()) continue;
+        return request;
+    }
+    return null;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+    if (!String(message.type || '').startsWith('BRAVEFOX_WEB_')) return false;
+
+    (async () => {
+        try {
+            const tabId = sender?.tab?.id;
+            if (!Number.isInteger(tabId)) throw new Error('BraveFox password gate could not identify the tab.');
+
+            if (message.type === 'BRAVEFOX_WEB_AUTH_GATE') {
+                const senderUrl = bravefoxNormalizeWebGateUrl(sender?.tab?.url || sender?.url || '');
+                const returnUrl = bravefoxNormalizeWebGateUrl(message.returnUrl || senderUrl);
+                if (!senderUrl || !returnUrl || bravefoxWebGateHost(senderUrl) !== bravefoxWebGateHost(returnUrl)) {
+                    throw new Error('BraveFox password gate return URL was denied.');
+                }
+
+                const state = bravefoxPruneWebAuthState(await bravefoxLoadWebAuthState());
+                const grantKey = bravefoxWebPageGrantKey(tabId, returnUrl);
+                const grant = state.pageGrants[grantKey];
+
+                if (bravefoxWebPageGrantIsActive(grant)) {
+                    const oneTime = grant.mode === 'one-time';
+                    if (oneTime) delete state.pageGrants[grantKey];
+
+                    await bravefoxSaveWebAuthState(state);
+                    sendResponse({
+                        ok: true,
+                        unlocked: true,
+                        session: grant.mode === 'session',
+                        oneTime,
+                        expiresAt: grant.mode === 'session' || oneTime ? null : grant.expiresAt
+                    });
+                    return;
+                }
+
+                let request = bravefoxFindPendingWebAuthRequest(state, 'page', tabId, returnUrl);
+                if (!request) {
+                    const requestId = bravefoxNewWebAuthRequestId();
+                    request = {
+                        requestId,
+                        kind: 'page',
+                        tabId,
+                        returnUrl,
+                        host: bravefoxWebGateHost(returnUrl),
+                        title: String(message.title || 'Password required').slice(0, 180),
+                        createdAt: Date.now(),
+                        expiresAt: Date.now() + BRAVEFOX_WEB_AUTH_REQUEST_TTL_MS
+                    };
+                    state.requests[requestId] = request;
+                }
+
+                await bravefoxSaveWebAuthState(state);
+
+                const params = new URLSearchParams({
+                    target: 'web',
+                    request: request.requestId,
+                    compact: '1',
+                    title: request.title
+                });
+                const passwordUrl = chrome.runtime.getURL(`html/password-protected.html?${params.toString()}`);
+                await chrome.tabs.update(tabId, { url: passwordUrl });
+                sendResponse({ ok: true, unlocked: false, redirecting: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_WEB_ACTION_GATE') {
+                const senderUrl = bravefoxNormalizeWebGateUrl(sender?.tab?.url || sender?.url || '');
+                const returnUrl = bravefoxNormalizeWebGateUrl(message.returnUrl || senderUrl);
+                const actionKey = String(message.actionKey || 'generic-action')
+                    .trim()
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_-]/g, '-')
+                    .slice(0, 160);
+
+                if (!senderUrl || !returnUrl || !actionKey || bravefoxWebGateHost(senderUrl) !== bravefoxWebGateHost(returnUrl)) {
+                    throw new Error('BraveFox action password request was denied.');
+                }
+
+                const state = bravefoxPruneWebAuthState(await bravefoxLoadWebAuthState());
+                const grantKey = bravefoxWebActionGrantKey(tabId, returnUrl, actionKey);
+                const grant = state.actionGrants[grantKey];
+
+                if (grant && Number(grant.expiresAt) > Date.now()) {
+                    delete state.actionGrants[grantKey];
+                    await bravefoxSaveWebAuthState(state);
+                    sendResponse({ ok: true, unlocked: true });
+                    return;
+                }
+
+                let request = bravefoxFindPendingWebAuthRequest(state, 'action', tabId, returnUrl, actionKey);
+                if (!request) {
+                    const requestId = bravefoxNewWebAuthRequestId();
+                    request = {
+                        requestId,
+                        kind: 'action',
+                        actionKey,
+                        tabId,
+                        returnUrl,
+                        host: bravefoxWebGateHost(returnUrl),
+                        title: String(message.title || 'Password required').slice(0, 180),
+                        createdAt: Date.now(),
+                        expiresAt: Date.now() + BRAVEFOX_WEB_AUTH_REQUEST_TTL_MS
+                    };
+                    state.requests[requestId] = request;
+                }
+
+                await bravefoxSaveWebAuthState(state);
+
+                const params = new URLSearchParams({
+                    target: 'web',
+                    request: request.requestId,
+                    compact: '1',
+                    title: request.title
+                });
+                const passwordUrl = chrome.runtime.getURL(`html/password-protected.html?${params.toString()}`);
+                await chrome.tabs.update(tabId, { url: passwordUrl });
+                sendResponse({ ok: true, unlocked: false, redirecting: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_WEB_AUTH_APPROVE') {
+                const requestId = String(message.requestId || '')
+                    .replace(/[^a-zA-Z0-9_-]/g, '')
+                    .slice(0, 128);
+
+                if (!requestId || !bravefoxIsWebPasswordPage(sender, requestId)) {
+                    throw new Error('BraveFox password approval was denied.');
+                }
+
+                const state = bravefoxPruneWebAuthState(await bravefoxLoadWebAuthState());
+                const request = state.requests[requestId];
+                if (!request || request.tabId !== tabId) throw new Error('BraveFox password request expired.');
+
+                if (request.kind === 'action') {
+                    const grantKey = bravefoxWebActionGrantKey(tabId, request.returnUrl, request.actionKey);
+                    state.actionGrants[grantKey] = {
+                        actionKey: request.actionKey,
+                        expiresAt: Date.now() + BRAVEFOX_WEB_ACTION_GRANT_TTL_MS
+                    };
+                } else {
+                    const grantKey = bravefoxWebPageGrantKey(tabId, request.returnUrl);
+                    const oneTimeScope = bravefoxWebOneTimePageScope(request.returnUrl);
+                    const sessionScope = bravefoxWebSessionPageScope(request.returnUrl);
+
+                    if (oneTimeScope) {
+                        state.pageGrants[grantKey] = {
+                            mode: 'one-time',
+                            scope: oneTimeScope,
+                            host: request.host,
+                            expiresAt: Date.now() + BRAVEFOX_WEB_AUTH_REQUEST_TTL_MS
+                        };
+                    } else if (sessionScope) {
+                        state.pageGrants[grantKey] = {
+                            mode: 'session',
+                            scope: sessionScope,
+                            host: request.host,
+                            grantedAt: Date.now()
+                        };
+                    } else {
+                        state.pageGrants[grantKey] = {
+                            mode: 'timed',
+                            host: request.host,
+                            grantedAt: Date.now(),
+                            expiresAt: Date.now() + BRAVEFOX_WEB_PAGE_GRANT_TTL_MS
+                        };
+                    }
+                }
+
+                delete state.requests[requestId];
+                await bravefoxSaveWebAuthState(state);
+                await chrome.tabs.update(tabId, { url: request.returnUrl });
+                sendResponse({ ok: true });
+                return;
+            }
+
+            sendResponse({ ok: false, error: 'Unknown BraveFox web password message.' });
+        } catch (error) {
+            sendResponse({ ok: false, error: error?.message || String(error) });
+        }
+    })();
+
+    return true;
+});
+
+
+
+// === BraveFox ChatGPT native password-page bridge ==============================
+// Protected ChatGPT routes/actions use the extension's top-level password page.
+// Requests are keyed to the originating tab and survive a brief MV3 worker nap via
+// chrome.storage.session. A successful password grants exactly one return trip.
+const BRAVEFOX_CHATGPT_AUTH_KEY = 'bravefoxChatGptAuthRequests_v1';
+const BRAVEFOX_CHATGPT_AUTH_TTL_MS = 2 * 60 * 1000;
+
+function bravefoxChatGptProtectedRouteKey(rawUrl) {
+    try {
+        const url = new URL(String(rawUrl || ''));
+        if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'chatgpt.com') return '';
+        const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+        const hash = decodeURIComponent(url.hash || '').toLowerCase();
+        if (pathname === '/library/d/6ab47ad73fe88191b5861b9b1f45132a' || pathname.startsWith('/library/d/6ab47ad73fe88191b5861b9b1f45132a/')) return 'library-protected-files';
+        if (pathname === '/plugins' || pathname.startsWith('/plugins/')) return 'plugins';
+        if (pathname === '/gpts' || pathname.startsWith('/gpts/')) return 'gpts';
+        if (hash.startsWith('#settings/personalization')) return 'personalization';
+        return '';
+    } catch (_) {
+        return '';
+    }
+}
+
+async function bravefoxLoadChatGptAuthRequests() {
+    try {
+        if (!chrome.storage?.session) return {};
+        const state = await chrome.storage.session.get([BRAVEFOX_CHATGPT_AUTH_KEY]);
+        const requests = state?.[BRAVEFOX_CHATGPT_AUTH_KEY];
+        return requests && typeof requests === 'object' ? requests : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+async function bravefoxSaveChatGptAuthRequests(requests) {
+    try {
+        if (!chrome.storage?.session) return;
+        await chrome.storage.session.set({ [BRAVEFOX_CHATGPT_AUTH_KEY]: requests || {} });
+    } catch (_) {}
+}
+
+function bravefoxPruneChatGptAuthRequests(requests) {
+    const now = Date.now();
+    for (const [id, request] of Object.entries(requests || {})) {
+        if (!request || Number(request.expiresAt) <= now) delete requests[id];
+    }
+    return requests;
+}
+
+function bravefoxIsChatGptPasswordPage(sender, requestId) {
+    try {
+        if (sender?.id !== chrome.runtime.id) return false;
+        const url = new URL(String(sender?.url || sender?.tab?.url || ''));
+        return url.protocol === 'chrome-extension:' &&
+            url.host === chrome.runtime.id &&
+            url.pathname === '/html/password-protected.html' &&
+            url.searchParams.get('target') === 'chatgpt' &&
+            (!requestId || url.searchParams.get('request') === requestId);
+    } catch (_) {
+        return false;
+    }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+    if (!String(message.type || '').startsWith('BRAVEFOX_CHATGPT_AUTH_')) return false;
+
+    (async () => {
+        try {
+            const tabId = sender?.tab?.id;
+            if (!Number.isInteger(tabId)) throw new Error('ChatGPT auth tab could not be identified.');
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_BEGIN') {
+                const senderUrl = String(sender?.tab?.url || sender?.url || '');
+                if (!senderUrl.startsWith('https://chatgpt.com/')) throw new Error('ChatGPT auth request denied.');
+
+                const returnUrl = String(message.returnUrl || '').trim();
+                const routeKey = bravefoxChatGptProtectedRouteKey(returnUrl);
+                if (!routeKey) throw new Error('ChatGPT auth return route is not protected.');
+
+                const requestId = String(message.requestId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96);
+                if (!requestId) throw new Error('ChatGPT auth request id is missing.');
+
+                const kind = ['protected-route', 'memory-summary', 'plugin-install', 'library-file-delete', 'library-edit-mode'].includes(message.kind)
+                    ? message.kind
+                    : 'protected-route';
+                const sourcePayload = message.payload && typeof message.payload === 'object' ? message.payload : {};
+                const payload = {
+                    pluginKey: String(sourcePayload.pluginKey || '').slice(0, 300),
+                    fileName: String(sourcePayload.fileName || '').slice(0, 500),
+                    href: String(sourcePayload.href || '').slice(0, 1200),
+                    rowText: String(sourcePayload.rowText || '').slice(0, 1200)
+                };
+                const title = String(message.title || 'ChatGPT page is password protected').slice(0, 180);
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                requests[requestId] = {
+                    requestId,
+                    tabId,
+                    returnUrl,
+                    routeKey,
+                    kind,
+                    payload,
+                    title,
+                    approved: false,
+                    createdAt: Date.now(),
+                    expiresAt: Date.now() + BRAVEFOX_CHATGPT_AUTH_TTL_MS
+                };
+                await bravefoxSaveChatGptAuthRequests(requests);
+
+                const params = new URLSearchParams({
+                    target: 'chatgpt',
+                    request: requestId,
+                    compact: '1',
+                    title
+                });
+                const passwordUrl = chrome.runtime.getURL(`html/password-protected.html?${params.toString()}`);
+                await chrome.tabs.update(tabId, { url: passwordUrl });
+                sendResponse({ ok: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_APPROVE') {
+                const requestId = String(message.requestId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96);
+                if (!requestId || !bravefoxIsChatGptPasswordPage(sender, requestId)) {
+                    throw new Error('ChatGPT auth approval denied.');
+                }
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                const request = requests[requestId];
+                if (!request || request.tabId !== tabId) throw new Error('ChatGPT auth request expired.');
+
+                request.approved = true;
+                request.expiresAt = Date.now() + 60 * 1000;
+                requests[requestId] = request;
+                await bravefoxSaveChatGptAuthRequests(requests);
+                await chrome.tabs.update(tabId, { url: request.returnUrl });
+                sendResponse({ ok: true });
+                return;
+            }
+
+            if (message.type === 'BRAVEFOX_CHATGPT_AUTH_CONSUME') {
+                const currentUrl = String(sender?.tab?.url || sender?.url || '');
+                const routeKey = bravefoxChatGptProtectedRouteKey(currentUrl);
+                if (!routeKey) {
+                    sendResponse({ ok: true, unlocked: false });
+                    return;
+                }
+
+                const requests = bravefoxPruneChatGptAuthRequests(await bravefoxLoadChatGptAuthRequests());
+                let matchId = '';
+                let match = null;
+                for (const [id, request] of Object.entries(requests)) {
+                    if (!request || !request.approved || request.tabId !== tabId || request.routeKey !== routeKey) continue;
+                    if (!match || Number(request.createdAt) > Number(match.createdAt)) {
+                        matchId = id;
+                        match = request;
+                    }
+                }
+
+                if (!match) {
+                    await bravefoxSaveChatGptAuthRequests(requests);
+                    sendResponse({ ok: true, unlocked: false });
+                    return;
+                }
+
+                delete requests[matchId];
+                await bravefoxSaveChatGptAuthRequests(requests);
+                sendResponse({
+                    ok: true,
+                    unlocked: true,
+                    routeKey: match.routeKey,
+                    kind: match.kind,
+                    payload: match.payload || {}
+                });
+                return;
+            }
+
+            sendResponse({ ok: false, error: 'Unknown ChatGPT auth message.' });
+        } catch (error) {
+            sendResponse({ ok: false, error: error?.message || String(error) });
+        }
+    })();
+
+    return true;
+});
+
+
+// === BraveFox Anti-WebP background fetch bridge ===
+// Google Images preview overlays live on google.* while the actual image may live on
+// another CDN. Drawing that cross-origin image directly to canvas taints it, so the
+// content script can ask the extension background to fetch the bytes with extension
+// host permissions, return a data URL, and let the content script convert that to PNG.
+const BRAVEFOX_ANTIWEBP_MAX_FETCH_BYTES = 18 * 1024 * 1024;
+
+function bravefoxArrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer || new ArrayBuffer(0));
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+}
+
+function bravefoxIsHttpImageFetchUrl(value) {
+    try {
+        const url = new URL(String(value || ''));
+        return url.protocol === 'https:' || url.protocol === 'http:';
+    } catch (e) {
+        return false;
+    }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || message.type !== 'BRAVEFOX_ANTIWEBP_FETCH_IMAGE_AS_DATA_URL') return false;
+
+    (async () => {
+        try {
+            const url = String(message.url || '').trim();
+            if (!bravefoxIsHttpImageFetchUrl(url)) {
+                sendResponse({ ok: false, error: 'Invalid image URL' });
+                return;
+            }
+
+            const response = await fetch(url, {
+                method: 'GET',
+                credentials: 'omit',
+                cache: 'no-store',
+                redirect: 'follow',
+                headers: {
+                    'Accept': 'image/png,image/jpeg,image/gif,image/bmp,image/*;q=0.8,*/*;q=0.1'
+                }
+            });
+
+            if (!response || !response.ok) {
+                sendResponse({ ok: false, error: 'Fetch failed', status: response ? response.status : 0 });
+                return;
+            }
+
+            const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+            if (!/^image\//i.test(contentType)) {
+                sendResponse({ ok: false, error: 'Response was not an image', contentType });
+                return;
+            }
+
+            // Preserve GIF/SVG instead of flattening/rewriting them.
+            if (/^image\/(?:gif|svg\+xml)$/i.test(contentType)) {
+                sendResponse({ ok: false, error: 'Skipped animated/vector image', contentType });
+                return;
+            }
+
+            const buffer = await response.arrayBuffer();
+            if (!buffer || buffer.byteLength <= 0) {
+                sendResponse({ ok: false, error: 'Empty image response', contentType });
+                return;
+            }
+            if (buffer.byteLength > BRAVEFOX_ANTIWEBP_MAX_FETCH_BYTES) {
+                sendResponse({ ok: false, error: 'Image too large', size: buffer.byteLength, contentType });
+                return;
+            }
+
+            const base64 = bravefoxArrayBufferToBase64(buffer);
+            sendResponse({
+                ok: true,
+                contentType,
+                size: buffer.byteLength,
+                dataUrl: `data:${contentType || 'image/png'};base64,${base64}`
+            });
+        } catch (e) {
+            sendResponse({ ok: false, error: e && (e.message || String(e)) });
+        }
+    })();
+
+    return true;
+});
+
+// Enhanced startup detection for force-installed extensions
+const onStartupHandler = () => {
+    console.log('Extension startup detected');
+    startKeepAlive();
+    // A browser restart is not an extension update: require a fresh password.
+    void bravefoxClearSystemLeaseOnBrowserStartup();
+};
+chrome.runtime.onStartup.addListener(onStartupHandler);
+
+// Track cleanup
+resourceTracker.addEventCleanup(() => {
+    chrome.runtime.onStartup.removeListener(onStartupHandler);
+});
+
+// Run the update once on install and explicitly wipe the session so bootManager forces fetch
+const onInstalledHandler = async (details) => {
+    console.log('Extension installed/updated:', details.reason);
+    startKeepAlive();
+    
+    if (details.reason === 'install') {
+        await chrome.storage.local.remove([
+            BRAVEFOX_SYSTEM_AUTH_LEASE_KEY, BRAVEFOX_SYSTEM_PENDING_KEY,
+            BRAVEFOX_WEB_AUTH_APPROVED_BACKUP_KEY
+        ]);
+    }
+    if ((details.reason === 'install' || details.reason === 'update') && chrome.storage.session) {
+        await chrome.storage.session.clear();
+    }
+};
+chrome.runtime.onInstalled.addListener(onInstalledHandler);
+
+// Track cleanup
+resourceTracker.addEventCleanup(() => {
+    chrome.runtime.onInstalled.removeListener(onInstalledHandler);
+});
+
+// Register event listeners
+registerEventListeners();
+
+// ===================================================================================
+// === THE CHROME STORAGE LISTENER TRIPWIRE ===
+// ===================================================================================
+if (chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
+        if (changes.hostsList) {
+            __hostsCache = Array.isArray(changes.hostsList.newValue) ? changes.hostsList.newValue : [];
+            __hostsCacheCount = __hostsCache.length;
+            console.log(`📌 Hosts cache updated from storage.onChanged: ${__hostsCacheCount} entries`);
+        }
+        if (changes.lastUpdated && typeof changes.lastUpdated.newValue === 'number') {
+            __hostsCacheLastUpdated = changes.lastUpdated.newValue;
+        }
+
+        // Detects ?force_refresh=true from wrestling.js
+        if (changes.wrestling_women_urls && changes.wrestling_women_urls.newValue === undefined) {
+            console.log('🚨 Background detected manual wrestling cache wipe! Fetching fresh roster instantly...');
+            updateWrestlingRoster();
+        }
+    });
+}
+
+// ===================================================================================
+// === WRESTLING DYNAMIC BACKGROUND FETCHER (THE GENDER-TAG SLICER V27) ===
+// ===================================================================================
+const WRESTLING_CACHE_TIME_KEY = 'wrestling_women_urls_time';
+const WRESTLING_CACHE_LIFETIME_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+const wrestlingManualBans = [
+	'/wrestlers/lainey-reid', '/wrestlers/kellyanne', '/wrestlers/kellyanne-english', '/wrestlers/asya',
+	'/wrestlers/nikita-naridian', '/wrestlers/riho', '/wrestlers/thekla', '/wrestlers/dani-sekelsky', 
+	'/wrestlers/kelly-kelly', '/roster/wwe2k26/alundra-blayze', '/wrestlers/roxxi', '/wrestlers/cora-jade', 
+	'/wrestlers/zelina-vega', '/wrestlers/tori', '/wrestlers/rosita', '/wrestlers/maryse', '/wrestlers/lita', 
+	'/wrestlers/aksana', '/wrestlers/kaitlyn', '/wrestlers/layla', '/wrestlers/tamina', '/wrestlers/su-yung',
+	'/wrestlers/melina', '/wrestlers/jacqueline', '/wrestlers/odb', '/wrestlers/alba-fyre', '/wrestlers/debra', 
+	'/wrestlers/lana', '/wrestlers/raquel', '/wrestlers/kamille', '/wrestlers/maxine', '/wrestlers/cora-jade',
+	'/wrestlers/cherry', '/wrestlers/sarita', '/wrestlers/shaniqua', '/wrestlers/francine', '/wrestlers/trinity', 
+	'/wrestlers/ivy-nile', '/wrestlers/mia-yim', '/wrestlers/brie-bella', '/wrestlers/carmella', '/wrestlers/sable', 
+	'/wrestlers/joy-giovanni', '/wrestlers/gail-kim', '/wrestlers/eve-torres', '/wrestlers/dawn-marie', 
+	'/wrestlers/taya-valkyrie', 
+];
+
+const wrestlingDoNotBroadcast = [
+    '/wrestlers/melina', '/wrestlers/melina-perez', '/wrestlers/aj-lee', '/wrestlers/chyna',
+    '/wrestlers/aj', '/wrestlers/becky-lynch', '/wrestlers/becky', '/wrestlers/katarina'
+];
+
+async function updateWrestlingRoster() {
+    try {
+        const localApi = (typeof browser !== 'undefined' && browser.storage) ? browser.storage.local : chrome.storage.local;
+        
+        const data = await new Promise(resolve => {
+            if (typeof browser !== 'undefined') {
+                localApi.get([WRESTLING_CACHE_TIME_KEY, 'wrestling_women_urls', 'v27_chrome_bump']).then(resolve);
+            } else {
+                localApi.get([WRESTLING_CACHE_TIME_KEY, 'wrestling_women_urls', 'v27_chrome_bump'], resolve);
+            }
+        });
+
+        const now = Date.now();
+        const lastFetch = data[WRESTLING_CACHE_TIME_KEY] || 0;
+
+        // V27 BUMP: Force-clear John Cena and the men globally!
+        if (!data.v27_chrome_bump) {
+            console.log('Force-clearing polluted cache via V27 bump...');
+            await new Promise(resolve => {
+                if (typeof browser !== 'undefined') {
+                    localApi.remove([WRESTLING_CACHE_TIME_KEY, 'wrestling_women_urls']).then(resolve);
+                } else {
+                    localApi.remove([WRESTLING_CACHE_TIME_KEY, 'wrestling_women_urls'], resolve);
+                }
+            });
+            await new Promise(resolve => {
+                if (typeof browser !== 'undefined') {
+                    localApi.set({ 'v27_chrome_bump': true }).then(resolve);
+                } else {
+                    localApi.set({ 'v27_chrome_bump': true }, resolve);
+                }
+            });
+        } 
+        else if (data.wrestling_women_urls && data.wrestling_women_urls.length > 0 && (now - lastFetch < WRESTLING_CACHE_LIFETIME_MS)) {
+            console.log('Wrestling roster cache is fresh. Skipping background fetch.');
+            return;
+        }
+
+        console.log('Fetching massive Roster pages using strict Gender-Tag Slicer...');
+        
+        const pagesToFetch = [
+            'https://www.thesmackdownhotel.com/roster/?promotion=wwe&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=aew&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=tna&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=njpw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=wcw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=ecw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=aaa&date=all-time#women',  
+            'https://www.thesmackdownhotel.com/roster/?promotion=roh&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=awa&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=nwa&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=lucha-underground&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=ovw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=ajpw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=noah&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=cmll&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=mlw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/?promotion=czw&date=all-time#women',
+            'https://www.thesmackdownhotel.com/roster/hall-of-fame/#women'
+        ];
+
+        let combinedUrls = [...wrestlingManualBans];
+        if (data.wrestling_women_urls) {
+            combinedUrls = [...combinedUrls, ...data.wrestling_women_urls];
+        }
+
+        for (const url of pagesToFetch) {
+            try {
+                const cleanUrl = url.split('#')[0];
+                const response = await fetch(cleanUrl, {
+                    credentials: 'omit', 
+                    headers: {
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+                    }
+                });
+                
+                if (!response.ok) continue;
+                const html = await response.text();
+
+                // === THE GENDER-TAG SLICER ===
+                const femaleChunks = html.split('gender-female');
+                for (let i = 1; i < femaleChunks.length; i++) {
+                    const chunk = femaleChunks[i];
+                    const isolatedBox = chunk.substring(0, 1500);
+                    
+                    const match = /href="(\/wrestlers\/[^"]+)"/i.exec(isolatedBox);
+                    if (match) {
+                        try {
+                            combinedUrls.push(new URL(match[1], 'https://www.thesmackdownhotel.com').pathname);
+                        } catch(e) {
+                            combinedUrls.push(match[1]);
+                        }
+                    }
+                }
+                
+                // Fallback for Video Game / Specific Roster pages
+                const panelChunks = html.split(/id=["']?(?:rlta-panel-women|rlta-women|roster-women)["']?/i);
+                for (let i = 1; i < panelChunks.length; i++) {
+                    let chunk = panelChunks[i];
+                    let endIdx = chunk.search(/id=["']?(?:rlta|ja-sidebar|<footer)/i);
+                    if (endIdx !== -1) chunk = chunk.substring(0, endIdx);
+                    
+                    const regex = /href="(\/wrestlers\/[^"]+)"/gi;
+                    let match;
+                    while ((match = regex.exec(chunk)) !== null) {
+                        try {
+                            combinedUrls.push(new URL(match[1], 'https://www.thesmackdownhotel.com').pathname);
+                        } catch(e) {
+                            combinedUrls.push(match[1]);
+                        }
+                    }
+                }
+            } catch(e) {}
+            
+            await new Promise(resolve => {
+                const tid = setTimeout(resolve, 800);
+                if (typeof resourceTracker !== 'undefined' && resourceTracker.addTimeout) {
+                    resourceTracker.addTimeout(tid);
+                }
+            });
+        }
+
+        combinedUrls = [...new Set(combinedUrls)];
+
+        const safeUrls = combinedUrls.filter(url => {
+            const slug = url.toLowerCase();
+            return !wrestlingDoNotBroadcast.some(blocked => slug.includes(blocked));
+        });
+
+        await new Promise(resolve => {
+            const payload = {
+                'wrestling_women_urls': safeUrls,
+                [WRESTLING_CACHE_TIME_KEY]: now
+            };
+            if (typeof browser !== 'undefined') {
+                localApi.set(payload).then(resolve);
+            } else {
+                localApi.set(payload, resolve);
+            }
+        });
+
+        console.log(`✅ Background wrestling roster update complete: ${safeUrls.length} strictly female names cached.`);
+
+    } catch (e) {
+        console.error('Wrestling background fetch error:', e);
+    }
+}
+// ===================================================================================
+
+// Set up hourly updates with memory optimization and tracking
+const hourlyUpdateId = setInterval(() => {
+    console.log('Running scheduled update...');
+    
+    // Check memory pressure before running heavy operations
+    if (resourceTracker.checkMemoryPressure()) {
+        console.warn('⚠️ High memory usage detected, performing cleanup before update...');
+        // Clean up caches before heavy operation
+        hostsCache.cleanup();
+        tryGarbageCollection();
+    }
+    
+    updateBlocklist();
+    updateWrestlingRoster();
+    
+    // Cleanup interval to prevent memory leaks - more aggressive cleanup
+    if (closedTabs.size > 50) {  // Reduced threshold
+        console.log('Cleaning up closedTabs set');
+        closedTabs.clear();
+    }
+    tryGarbageCollection();
+}, 1 * 60 * 60 * 1000); // Update every hour
+resourceTracker.addInterval(hourlyUpdateId);
+
+// Enhanced cleanup interval for memory management - more frequent and comprehensive
+const memoryCleanupId = setInterval(() => {
+    // Clean up closedTabs set if it grows too large - more frequent cleanup
+    if (closedTabs.size > 25) { // Reduced threshold
+        console.log('Cleaning up closedTabs set');
+        closedTabs.clear();
+    }
+
+    // Clean up hostsCache
+    hostsCache.cleanup();
+
+    // Check memory pressure and perform GC if needed
+    const memoryMB = resourceTracker.getMemoryUsage();
+    if (memoryMB > 100) { // 100MB threshold
+        console.log(`🧹 Memory cleanup triggered at ${memoryMB}MB`);
+        tryGarbageCollection();
+        
+        if (memoryMB > 125) { // 125MB critical threshold
+            console.warn(`🚨 Critical memory usage: ${memoryMB}MB - forcing aggressive cleanup`);
+            hostsCache.clear();
+            closedTabs.clear();
+            tryGarbageCollection();
+        }
+    }
+}, 2 * 60 * 1000); // Every 2 minutes (more frequent)
+resourceTracker.addInterval(memoryCleanupId);
+
+// Suppress specific error
+try {
+    // Your service worker registration logic
+} catch (e) {
+    if (e.message && e.message.includes("Status code: 10")) {
+        console.warn("Shit, son. Yet another error code 10! This bastard can be safely ignored.");
+    } else {
+        console.error("Yeah, fuck this. Yet another registration error! Error code:", e);
+    }
+}
+
+// Enhanced cleanup on extension shutdown/suspend
+const handleExtensionSuspend = () => {
+    console.log('🧹 Extension suspending - performing complete cleanup...');
+    resourceTracker.cleanup();
+};
+
+// Listen for extension suspend events
+if (chrome.runtime.onSuspend) {
+    chrome.runtime.onSuspend.addListener(handleExtensionSuspend);
+}
+
+if (chrome.runtime.onSuspendCanceled) {
+    chrome.runtime.onSuspendCanceled.addListener(() => {
+        console.log('Extension suspend canceled - restarting keep-alive');
+        startKeepAlive();
+    });
+}
+
+// === SMART BOOT MANAGER ===
+const bootManager = async () => {
+    try {
+        await ensureInitialHistoryAutoClearPurge();
+        await primeHistoryAutoClearTabTracking();
+        if (chrome.storage.session) {
+            const sessionState = await chrome.storage.session.get(['is_sw_awake']);
+            
+            if (!sessionState.is_sw_awake) {
+                console.log('🔄 Extension Manually Reloaded or Cold Started!');
+                console.log('🔄 Keeping cached hosts active while fetching a fresh blocklist...');
+
+                await chrome.storage.session.set({ is_sw_awake: true });
+
+                // Preserve hostsChunk_*, hostsChunks, hostsTotal and lastUpdate across
+                // extension updates/restarts. initializeExtension loads this protection
+                // immediately, then fetches fresh sources and commits only real changes.
+                const keysToRemove = [
+                    'wrestling_women_urls_time', 'wrestling_women_urls', 'v27_chrome_bump'
+                ];
+
+                await new Promise(resolve => chrome.storage.local.remove(keysToRemove, resolve));
+
+                await initializeExtension();
+            } else {
+                console.log('💤 Service Worker woke up. Loading from local memory (skipping network spam)...');
+
+                // Reassert the allow rule on every service-worker wake.
+                await updateAllowlistRules();
+                
+                const cachedHosts = await getAllHostsList();
+                if (cachedHosts.length > 0) {
+                    hostsListForClosure = new Set(cachedHosts);
+                    console.log(`Loaded ${hostsListForClosure.size} hosts for immediate blocking.`);
+                } else {
+                    await updateBlocklist();
+                }
+                
+                await updateIncognitoBlockingRules();
+                updateWrestlingRoster();
+                await scanAndRedirectProtectedTabs();
+            }
+        } else {
+            await initializeExtension();
+        }
+    } catch (error) {
+        console.error("Boot manager error:", error);
+        await initializeExtension();
+    }
+};
+
+// Recheck a live tab after Web Store rules have loaded. Titles can arrive well
+// after the URL (including during Web Store SPA navigation). A stale tab title
+// should never be used against a fresh navigation during its loading state.
+async function braveFoxCloseWebStoreTitleMatch(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0 || closedTabs.has(tabId)) return false;
+    if (!await braveFoxWebStorePolicyReady || closedTabs.has(tabId)) return false;
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch (_) { return false; }
+    const url = tab?.url || '';
+    if (!url || !tab?.title || !braveFoxIsChromeWebStoreUrl(url) ||
+        tab.status !== 'complete' || closedTabs.has(tabId)) return false;
+    const reason = braveFoxWebStoreBlockedReason(url, tab.title);
+    if (reason?.source !== 'webstore-detail-title-regex') return false;
+    closedTabs.add(tabId);
+    console.log('[BraveFox Web Store] Closing listing title match:', reason.match);
+    const closed = await closeBlockedTabImmediately(url, tabId);
+    if (!closed) closedTabs.delete(tabId);
+    return Boolean(closed);
+}
+
+(() => {
+// After reading google.js, catch Web Store pages opened during MV3 cold-start.
+void braveFoxWebStorePolicyReady.then(ok => {
+    if (!ok) return;
+    return chrome.tabs.query({}).then(tabs => {
+        for (const tab of tabs) {
+            const url = tab?.url || tab?.pendingUrl || '';
+            if (!Number.isInteger(tab?.id) || closedTabs.has(tab.id)) continue;
+            if (braveFoxWebStoreBlockedReason(url)) {
+                closedTabs.add(tab.id);
+                void closeBlockedTabImmediately(url, tab.id);
+            } else if (braveFoxIsChromeWebStoreUrl(url) && tab.status === 'complete') {
+                // Startup scan also covers already-open detail pages by title.
+                void braveFoxCloseWebStoreTitleMatch(tab.id);
+            }
+        }
+    });
+}).catch(error => console.warn('[BraveFox Web Store] Startup scan failed:', error));
+
+// Revisit a completed Web Store listing when returning to an existing tab.
+chrome.tabs?.onActivated?.addListener(info => {
+    if (Number.isInteger(info?.tabId)) void braveFoxCloseWebStoreTitleMatch(info.tabId);
+});
+})();
+
+bootManager();
+})();
+
+
+// ---------------------------------------------------------------------------
+// BraveFox BlockSite tab-control bridge
+// ---------------------------------------------------------------------------
+// Content scripts cannot reliably close normal browser tabs with window.close(),
+// and they cannot navigate to chrome://newtab/. Do those privileged operations
+// from the background instead. The preferred destination is Chrome's real New Tab
+// page; about:blank is only the last-ditch fallback if Chrome rejects everything.
+(() => {
+  const NEW_TAB_URL = 'chrome://newtab/';
+  const SAFE_BLANK_URL = 'about:blank';
+
+  function getSenderTabId(sender) {
+    try {
+      const id = sender && sender.tab && sender.tab.id;
+      return (typeof id === 'number') ? id : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function deleteHistoryUrl(url) {
+    try {
+      const value = String(url || '').trim();
+      if (!value || !/^https?:\/\/user\.blocksite\.co\//i.test(value)) return;
+      await chrome.history.deleteUrl({ url: value });
+    } catch (_) {}
+  }
+
+  async function sendTabToNewTab(tabId, senderTab) {
+    // Best case: replace the blocked page in the same tab with Chrome's New Tab page.
+    try {
+      await chrome.tabs.update(tabId, { url: NEW_TAB_URL, active: true });
+      return { ok: true, newtab: true, method: 'update' };
+    } catch (updateError) {
+      // Some Chromium builds are picky about chrome:// pages through update(). In that
+      // case, create a real new tab, then remove the blocked tab. Creating without a URL
+      // opens the browser's configured New Tab page.
+      try {
+        const createOptions = { active: true };
+        if (senderTab && typeof senderTab.windowId === 'number') createOptions.windowId = senderTab.windowId;
+        if (senderTab && typeof senderTab.index === 'number') createOptions.index = senderTab.index;
+        const created = await chrome.tabs.create(createOptions);
+        try { await chrome.tabs.remove(tabId); } catch (_) {}
+        return { ok: true, newtab: true, method: 'create-remove', createdTabId: created && created.id, updateError: (updateError && updateError.message) || String(updateError) };
+      } catch (createError) {
+        // Absolute emergency fallback. This should be rare, but avoids leaving the
+        // BlockSite page visible if New Tab handling fails.
+        try {
+          await chrome.tabs.update(tabId, { url: SAFE_BLANK_URL, active: true });
+          return { ok: true, blanked: true, method: 'about-blank', updateError: (updateError && updateError.message) || String(updateError), createError: (createError && createError.message) || String(createError) };
+        } catch (blankError) {
+          return { ok: false, error: (blankError && blankError.message) || String(blankError), updateError: (updateError && updateError.message) || String(updateError), createError: (createError && createError.message) || String(createError) };
+        }
+      }
+    }
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === 'BRAVEFOX_CLEAN_BLOCKSITE_HISTORY') {
+      (async () => {
+        try {
+          await deleteHistoryUrl(message.currentUrl);
+          try { await deleteHistoryUrl(sender && sender.tab && sender.tab.url); } catch (_) {}
+          sendResponse && sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'BRAVEFOX_GO_SAFE_HOME') {
+      (async () => {
+        const tabId = getSenderTabId(sender);
+        if (tabId == null) {
+          sendResponse && sendResponse({ ok: false, error: 'missing-sender-tab' });
+          return;
+        }
+
+        try {
+          const result = await sendTabToNewTab(tabId, sender && sender.tab);
+          sendResponse && sendResponse(result);
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    if (message.type === 'BRAVEFOX_CLOSE_BLOCKSITE_PAGE') {
+      (async () => {
+        const tabId = getSenderTabId(sender);
+        if (tabId == null) {
+          sendResponse && sendResponse({ ok: false, error: 'missing-sender-tab' });
+          return;
+        }
+
+        try { await deleteHistoryUrl(sender && sender.tab && sender.tab.url); } catch (_) {}
+
+        try {
+          const result = await sendTabToNewTab(tabId, sender && sender.tab);
+          sendResponse && sendResponse(result);
+        } catch (e) {
+          sendResponse && sendResponse({ ok: false, error: (e && e.message) || String(e) });
+        }
+      })();
+      return true;
+    }
+
+    return false;
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// BraveFox Redirect Logger bridge
+// ---------------------------------------------------------------------------
+// Content scripts send only blocked Google redirects and BlockSite blocked-page hits here.
+// The background forwards those entries to the optional native messaging host, which
+// appends them to D:\Haukiraumojen Tiedostot\Tiedostoja\Scripts\Logs\BraveFoxRedirect.log.
+(() => {
+  const HOST_NAME = 'com.bravefox.redirect_logger';
+  const LOG_TYPE = 'BRAVEFOX_REDIRECT_LOG';
+  const GOOGLE_QUERY_CONTEXT_TYPE = 'BRAVEFOX_GOOGLE_QUERY_CONTEXT';
+  const GET_GOOGLE_QUERY_CONTEXT_TYPE = 'BRAVEFOX_GET_LAST_GOOGLE_QUERY_CONTEXT';
+
+  const recentGoogleQueryByTab = new Map();
+  let recentGlobalGoogleQuery = null;
+  const GOOGLE_QUERY_MAX_AGE_MS = 2 * 60 * 1000;
+  let nativeBrowserInfoPromise = null;
+
+  function getNativeBrowserInfo() {
+    if (!nativeBrowserInfoPromise) {
+      nativeBrowserInfoPromise = (async () => {
+        const ua = String(globalThis.navigator?.userAgent || '');
+        let browserName = 'Chrome';
+        let browserVersion = '';
+        const edge = /Edg\/([\d.]+)/i.exec(ua);
+        const opera = /(?:OPR|Opera)\/([\d.]+)/i.exec(ua);
+        const vivaldi = /Vivaldi\/([\d.]+)/i.exec(ua);
+        const chrome = /(?:Chrome|CriOS)\/([\d.]+)/i.exec(ua);
+        if (edge) { browserName = 'Edge'; browserVersion = edge[1]; }
+        else if (opera) { browserName = 'Opera'; browserVersion = opera[1]; }
+        else if (vivaldi) { browserName = 'Vivaldi'; browserVersion = vivaldi[1]; }
+        else if (chrome) {
+          browserVersion = chrome[1];
+          try {
+            if (globalThis.navigator?.brave?.isBrave && await globalThis.navigator.brave.isBrave()) browserName = 'Brave';
+          } catch {}
+        }
+        return { browserName, browserVersion, browserEdition: '', browserBuildId: '', browserPlatform: 'desktop' };
+      })();
+    }
+    return nativeBrowserInfoPromise;
+  }
+
+  function cleanShortText(value, maxLength = 1000) {
+    return (value == null) ? '' : String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+  }
+
+  function parseGoogleSearchQueryFromUrl(inputUrl) {
+    try {
+      const url = new URL(String(inputUrl || ''));
+      const host = (url.hostname || '').toLowerCase();
+      if (!/^([a-z0-9-]+\.)?google\./i.test(host) && !/\.google\./i.test(host)) return '';
+      const q = url.searchParams.get('q') || url.searchParams.get('query') || url.searchParams.get('search') || '';
+      return cleanShortText(q, 1000);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function normalizeForCompare(value) {
+    return cleanShortText(value, 1000).toLowerCase();
+  }
+
+  function rememberGoogleQueryContext(tabId, inputUrl, attemptedSearch, source) {
+    try {
+      const query = cleanShortText(attemptedSearch || parseGoogleSearchQueryFromUrl(inputUrl), 1000);
+      if (!query) return null;
+
+      const context = {
+        query,
+        pageUrl: cleanShortText(inputUrl || '', 1000),
+        source: cleanShortText(source || 'google', 80),
+        timestamp: Date.now()
+      };
+
+      if (typeof tabId === 'number' && tabId >= 0) {
+        recentGoogleQueryByTab.set(tabId, context);
+      }
+      recentGlobalGoogleQuery = context;
+      pruneOldGoogleQueryContexts();
+      return context;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pruneOldGoogleQueryContexts() {
+    try {
+      const now = Date.now();
+      for (const [tabId, context] of recentGoogleQueryByTab.entries()) {
+        if (!context || now - (context.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) {
+          recentGoogleQueryByTab.delete(tabId);
+        }
+      }
+      if (recentGlobalGoogleQuery && now - (recentGlobalGoogleQuery.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) {
+        recentGlobalGoogleQuery = null;
+      }
+    } catch (_) {}
+  }
+
+  function isGoogleQueryCandidateUseful(context, blockedWord) {
+    try {
+      if (!context || !context.query) return false;
+      if (Date.now() - (context.timestamp || 0) > GOOGLE_QUERY_MAX_AGE_MS) return false;
+
+      const term = normalizeForCompare(blockedWord);
+      if (!term) return true;
+
+      const query = normalizeForCompare(context.query);
+      if (!query) return false;
+      return query.includes(term);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function getBestRecentGoogleQueryContext(sender, blockedWord) {
+    pruneOldGoogleQueryContexts();
+
+    try {
+      const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+      const byTab = recentGoogleQueryByTab.get(tabId);
+      if (isGoogleQueryCandidateUseful(byTab, blockedWord)) return byTab;
+    } catch (_) {}
+
+    if (isGoogleQueryCandidateUseful(recentGlobalGoogleQuery, blockedWord)) return recentGlobalGoogleQuery;
+    return null;
+  }
+
+  function highlightSearchForPlainLog(value, trigger) {
+    const text = cleanShortText(value, 1000);
+    const term = cleanShortText(trigger, 240);
+    if (!text || !term) return text;
+
+    try {
+      const alreadyMarked = new RegExp('\\*' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\*', 'i');
+      if (alreadyMarked.test(text)) return text;
+
+      const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
+      let hit = false;
+      const highlighted = text.replace(re, (match) => {
+        hit = true;
+        return '*' + match + '*';
+      });
+      return hit ? highlighted : text;
+    } catch (_) {
+      return text;
+    }
+  }
+
+  try {
+    if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+      chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+        try {
+          if (!details || details.frameId !== 0 || isBraveFoxCompletelyExcludedUrl(details.url)) return;
+          const query = parseGoogleSearchQueryFromUrl(details.url);
+          if (query) rememberGoogleQueryContext(details.tabId, details.url, query, 'webNavigation');
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+
+  try {
+    if (chrome.tabs && chrome.tabs.onUpdated) {
+      chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+        try {
+          const url = (changeInfo && changeInfo.url) || (tab && tab.url) || '';
+          if (isBraveFoxCompletelyExcludedUrl(url)) return;
+          const query = parseGoogleSearchQueryFromUrl(url);
+          if (query) rememberGoogleQueryContext(tabId, url, query, 'tabs.onUpdated');
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+
+  function sanitizeLogPayload(payload) {
+    const out = {};
+    const fields = ['source', 'sourceCode', 'extensionName', 'extensionVersion', 'reasonType', 'reasonDetail', 'blockedWord', 'attemptedSearch', 'context', 'pageUrl', 'referrer', 'timestamp', 'browserName', 'browserVersion', 'browserEdition', 'browserBuildId', 'browserPlatform'];
+    for (const key of fields) {
+      const value = payload && payload[key];
+      out[key] = (value == null) ? '' : String(value).slice(0, 1000);
+    }
+    out.type = LOG_TYPE;
+    return out;
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || !message.type) return;
+
+    if (message.type === GOOGLE_QUERY_CONTEXT_TYPE) {
+      try {
+        const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+        const context = rememberGoogleQueryContext(tabId, message.pageUrl || (sender && sender.tab && sender.tab.url) || '', message.attemptedSearch || message.query || '', 'content-script');
+        sendResponse && sendResponse({ ok: !!context });
+      } catch (_) {
+        sendResponse && sendResponse({ ok: false });
+      }
+      return;
+    }
+
+    if (message.type === GET_GOOGLE_QUERY_CONTEXT_TYPE) {
+      try {
+        const blockedWord = message.blockedWord || '';
+        const context = getBestRecentGoogleQueryContext(sender, blockedWord);
+        sendResponse && sendResponse({
+          ok: !!context,
+          attemptedSearch: context ? context.query : '',
+          query: context ? context.query : '',
+          pageUrl: context ? context.pageUrl : '',
+          source: context ? context.source : '',
+          ageMs: context ? (Date.now() - (context.timestamp || 0)) : 0
+        });
+      } catch (_) {
+        sendResponse && sendResponse({ ok: false, attemptedSearch: '', query: '' });
+      }
+      return;
+    }
+
+    if (message.type !== LOG_TYPE) return;
+
+    const payload = sanitizeLogPayload(message);
+    try {
+      if (sender && sender.tab && sender.tab.url && !payload.pageUrl) payload.pageUrl = String(sender.tab.url).slice(0, 1000);
+    } catch (_) {}
+
+    try {
+      const tabId = sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : -1;
+      if (payload.attemptedSearch) {
+        rememberGoogleQueryContext(tabId, payload.pageUrl || (sender && sender.tab && sender.tab.url) || '', payload.attemptedSearch, 'redirect-log');
+      }
+      payload.attemptedSearch = highlightSearchForPlainLog(payload.attemptedSearch, payload.blockedWord);
+    } catch (_) {}
+
+    (async () => {
+      try {
+        const manifest = chrome.runtime.getManifest();
+        const detector = cleanShortText(payload.source || '', 120);
+        const detail = cleanShortText([detector, payload.context].filter(Boolean).join(' — '), 500);
+        Object.assign(payload, await getNativeBrowserInfo(), {
+          source: 'BraveFox Enhancer (BFE)',
+          sourceCode: 'BFE',
+          extensionName: manifest.name || '',
+          extensionVersion: manifest.version || '',
+          reasonType: payload.reasonType || 'term',
+          reasonDetail: payload.reasonDetail || detail || 'BraveFox Enhancer content filter'
+        });
+
+        chrome.runtime.sendNativeMessage(HOST_NAME, payload, (response) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            try { console.warn('[BraveFox Redirect Logger] Native host unavailable:', lastError.message); } catch (_) {}
+            sendResponse && sendResponse({ ok: false, error: lastError.message || 'native-host-unavailable' });
+            return;
+          }
+          sendResponse && sendResponse(response || { ok: true });
+        });
+      } catch (e) {
+        try { console.warn('[BraveFox Redirect Logger] Failed to send native log:', e); } catch (_) {}
+        sendResponse && sendResponse({ ok: false, error: String(e && e.message || e) });
+      }
+    })();
+    return true;
+  });
+})();
+
+// === BraveFox ChatGPT Reliability — passive, non-blocking network diagnostics ===
+// This module never changes, blocks, replays or redirects ChatGPT's own requests.
+(() => {
+  'use strict';
+  const extension = globalThis.browser?.webRequest ? globalThis.browser : globalThis.chrome;
+  if (!extension?.webRequest || !extension?.runtime?.onMessage) return;
+
+  const PROTOCOL = 'bravefox:chat-reliability:v1';
+  const SESSION_KEY = 'bravefoxChatReliabilityCooldownV1';
+  const inFlight = new Map();
+  const recentGets = new Map();
+  const tabStats = new Map();
+  let cooldownUntil = 0;
+  let lastStatus = 0;
+  const options = { urls: ['https://chatgpt.com/*'], types: ['xmlhttprequest', 'main_frame', 'sub_frame', 'other', 'script', 'image', 'stylesheet', 'font', 'media'] };
+  const now = () => Date.now();
+
+  // Exact GET endpoints used when restoring an existing conversation and its list.
+  // Keep only endpoint categories, never request URLs or conversation identifiers.
+  function diagnosticKind(url, method) {
+    if (method !== 'GET') return '';
+    try {
+      const path = new URL(url).pathname;
+      if (/^\/backend-api\/conversation\/[^/]+\/?$/.test(path)) return 'conversation GET';
+      if (/^\/backend-api\/conversations\/?$/.test(path)) return 'conversation list';
+      if (/^\/api\/auth\/session\/?$/.test(path)) return 'auth session';
+    } catch {}
+    return '';
+  }
+
+  const diagnosticDefaults = () => ({
+    loadRequests: 0, loadSuccess: 0, load429: 0, load5xx: 0,
+    loadOther4xx: 0, loadNetworkErrors: 0, loadConsecutiveFailures: 0,
+    loadFailureStartAt: 0, lastLoadFailureAt: 0, lastLoadSuccessAt: 0,
+    lastLoadStatus: 0, lastLoadFailureStatus: 0, lastLoadAt: 0, listErrors: 0, list429: 0,
+    authErrors: 0, recentLoadEvents: [],
+    lastLoad429At: 0, lastLoad429RetryAfterMs: 0,
+    lastLoad429RetryAfterState: 'unavailable'
+  });
+
+  // A small per-tab timeline: endpoint category + status + time + numeric retry hint.
+  // Never record URLs, conversation identifiers, request bodies or raw headers.
+  function appendEvent(stat, kind, status, stamp, request) {
+    if (!stat) return;
+    const item = { kind, status, at: stamp };
+    if (status === 429 && kind === 'conversation GET') {
+      item.retryAfterState = request?.retryAfterState || 'unavailable';
+      item.retryAfterMs = request?.retryAfterMs || 0;
+    }
+    stat.recentLoadEvents.push(item);
+    if (stat.recentLoadEvents.length > 16) stat.recentLoadEvents.shift();
+  }
+
+  function recordDiagnostic(stat, kind, status, stamp, request) {
+    if (!stat || !kind) return;
+    const failure = status === 'network' || (typeof status === 'number' && status >= 400);
+    if (kind === 'conversation GET') {
+      stat.loadRequests++;
+      stat.lastLoadAt = stamp;
+      stat.lastLoadStatus = typeof status === 'number' ? status : 0;
+      if (failure) {
+        if (!stat.loadConsecutiveFailures) stat.loadFailureStartAt = stamp;
+        stat.loadConsecutiveFailures++;
+        stat.lastLoadFailureAt = stamp;
+        stat.lastLoadFailureStatus = typeof status === 'number' ? status : 0;
+        if (status === 429) {
+          stat.load429++;
+          stat.lastLoad429At = stamp;
+          stat.lastLoad429RetryAfterState = request?.retryAfterState || 'unavailable';
+          stat.lastLoad429RetryAfterMs = request?.retryAfterMs || 0;
+        } else if (status === 'network') stat.loadNetworkErrors++;
+        else if (status >= 500) stat.load5xx++;
+        else if (status >= 400 && status < 500) stat.loadOther4xx++;
+        appendEvent(stat, kind, status, stamp, request);
+      } else if (typeof status === 'number' && ((status >= 200 && status < 300) || status === 304)) {
+        const hadFailures = stat.loadConsecutiveFailures > 0;
+        stat.loadSuccess++;
+        stat.lastLoadSuccessAt = stamp;
+        stat.loadConsecutiveFailures = 0;
+        stat.loadFailureStartAt = 0;
+        // A successful HTTP response is a recovery *signal*, not proof that React recovered.
+        if (hadFailures) appendEvent(stat, kind, status, stamp);
+      }
+    } else if (failure && kind === 'conversation list') {
+      stat.listErrors++;
+      if (status === 429) stat.list429++;
+      appendEvent(stat, kind, status, stamp);
+    } else if (failure && kind === 'auth session') {
+      stat.authErrors++;
+      appendEvent(stat, kind, status, stamp);
+    }
+  }
+
+  function sendTabState(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) return;
+    try {
+      const sent = extension.tabs?.sendMessage?.(tabId, { type: PROTOCOL + ':state', snapshot: snapshot(tabId) });
+      if (sent && typeof sent.catch === 'function') sent.catch(() => {});
+    } catch {}
+  }
+
+  function categoryOf(url) {
+    try {
+      const path = new URL(url).pathname;
+      if (path.startsWith('/backend-api/conversation/')) return 'conversation';
+      if (path.startsWith('/backend-api/')) return 'backend';
+      if (path.startsWith('/api/auth/')) return 'authentication';
+      if (/\.(?:js|css|woff2?|png|jpe?g|webp|svg|avif)(?:$|\/)/i.test(path)) return 'asset';
+      return 'other';
+    } catch { return 'other'; }
+  }
+
+  // Ephemeral fingerprint only. Never retain full URLs, conversation IDs or query strings.
+  function fingerprint(method, url) {
+    let hash = 2166136261;
+    try {
+      const input = method + ':' + new URL(url).pathname;
+      for (let i = 0; i < input.length; i++) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+    } catch {}
+    return hash >>> 0;
+  }
+
+  function counters(tabId) {
+    if (!Number.isInteger(tabId) || tabId < 0) return null;
+    if (!tabStats.has(tabId)) {
+      if (tabStats.size >= 80) tabStats.delete(tabStats.keys().next().value);
+      tabStats.set(tabId, { requests: 0, suspectedDuplicates: 0, rateLimits: 0, serverErrors: 0, networkErrors: 0, lastStatus: 0, updatedAt: 0, ...diagnosticDefaults() });
+    }
+    return tabStats.get(tabId);
+  }
+
+  function snapshot(tabId) {
+    return {
+      ...({ requests: 0, suspectedDuplicates: 0, rateLimits: 0, serverErrors: 0, networkErrors: 0, lastStatus: 0 }),
+      ...diagnosticDefaults(),
+      diagnosticsVersion: 3,
+      tabScoped: true,
+      ...(tabStats.get(tabId) || {}),
+      cooldownUntil: cooldownUntil > now() ? cooldownUntil : 0,
+      lastObservedStatus: lastStatus
+    };
+  }
+
+  // The diagnostic hint is NOT BraveFox's 5-minute optional-request cooldown.
+  // Keep the server's suggested duration (up to 24h) distinct from our own cap.
+  function retryAfterHint(headers) {
+    if (!Array.isArray(headers) || headers.length === 0) return { state: 'unavailable', ms: 0 };
+    const header = headers.find(h => String(h.name || '').toLowerCase() === 'retry-after');
+    if (!header) return { state: 'missing', ms: 0 };
+    const value = String(header.value || '').trim();
+    if (!value) return { state: 'invalid', ms: 0 };
+    const seconds = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+    const duration = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now();
+    if (!Number.isFinite(duration) || duration < 0) return { state: 'invalid', ms: 0 };
+    return { state: 'valid', ms: Math.min(24 * 60 * 60 * 1000, Math.ceil(duration)) };
+  }
+
+  function parseRetryAfter(value) {
+    const input = String(value || '').trim();
+    if (!input) return 0;
+    const seconds = Number(input);
+    const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(input) - now();
+    return Number.isFinite(ms) ? Math.min(300000, Math.max(1000, ms)) : 0;
+  }
+
+  function broadcastState() {
+    for (const tabId of tabStats.keys()) {
+      try {
+        // Fire and forget. Closed tabs and temporarily missing listeners are expected.
+        const sent = extension.tabs?.sendMessage?.(tabId, { type: PROTOCOL + ':state', snapshot: snapshot(tabId) });
+        if (sent && typeof sent.catch === 'function') sent.catch(() => {});
+      } catch {}
+    }
+  }
+
+  function applyCooldown(ms) {
+    const target = now() + Math.max(15000, Math.min(300000, ms || 60000));
+    if (target <= cooldownUntil) return;
+    cooldownUntil = target;
+    try {
+      const written = extension.storage?.session?.set?.({ [SESSION_KEY]: target });
+      if (written && typeof written.catch === 'function') written.catch(() => {});
+    } catch {}
+    broadcastState();
+  }
+
+  // MV3 service workers can restart. Restore a small expiry timestamp, never a request log.
+  const sessionReady = (async () => {
+    try {
+      if (!extension.storage?.session) return;
+      const value = await extension.storage.session.get(SESSION_KEY);
+      cooldownUntil = Math.max(cooldownUntil, Number(value?.[SESSION_KEY] || 0));
+    } catch {}
+  })();
+
+  try {
+    extension.webRequest.onBeforeRequest.addListener(details => {
+      const stamp = now();
+      const stat = counters(details.tabId);
+      if (stat) { stat.requests++; stat.updatedAt = stamp; }
+      const category = categoryOf(details.url);
+      if (details.method === 'GET' && category !== 'asset') {
+        const key = `${details.tabId}:${fingerprint('GET', details.url)}`;
+        const previous = recentGets.get(key) || 0;
+        if (stat && stamp - previous < 1250) stat.suspectedDuplicates++;
+        recentGets.set(key, stamp);
+        if (recentGets.size > 300) recentGets.clear();
+      }
+      inFlight.set(details.requestId, {
+        tabId: details.tabId, category, retryAfterMs: 0,
+        retryAfterState: 'unavailable',
+        diagnosticKind: diagnosticKind(details.url, details.method)
+      });
+      if (inFlight.size > 1500) inFlight.clear();
+    }, options);
+
+    extension.webRequest.onHeadersReceived.addListener(details => {
+      const entry = inFlight.get(details.requestId);
+      if (!entry || details.statusCode !== 429) return;
+      const hint = retryAfterHint(details.responseHeaders);
+      entry.retryAfterState = hint.state;
+      entry.retryAfterMs = hint.ms;
+    }, options, ['responseHeaders']);
+
+    extension.webRequest.onCompleted.addListener(details => {
+      const entry = inFlight.get(details.requestId);
+      inFlight.delete(details.requestId);
+      lastStatus = details.statusCode || 0;
+      const stat = counters(details.tabId);
+      const stamp = now();
+      if (stat) {
+        stat.lastStatus = lastStatus;
+        stat.updatedAt = stamp;
+        recordDiagnostic(stat, entry?.diagnosticKind, details.statusCode || 0, stamp, entry);
+      }
+      if (entry?.diagnosticKind) sendTabState(details.tabId);
+      if (details.statusCode === 429) {
+        if (stat) stat.rateLimits++;
+        if (entry?.category !== 'asset') applyCooldown(entry?.retryAfterMs || 60000);
+      } else if (details.statusCode >= 500) {
+        if (stat) stat.serverErrors++;
+      }
+      if (details.statusCode === 429 || details.statusCode >= 500) broadcastState();
+    }, options);
+
+    extension.webRequest.onErrorOccurred.addListener(details => {
+      const entry = inFlight.get(details.requestId);
+      inFlight.delete(details.requestId);
+      // Abort/cancel during navigation or tab close is not a network outage.
+      const cancelled = /(?:ABORT|CANCEL|BINDING_ABORT)/i.test(String(details.error || ''));
+      if (cancelled) return;
+      const stat = counters(details.tabId);
+      if (stat) {
+        stat.networkErrors++;
+        stat.updatedAt = now();
+        recordDiagnostic(stat, entry?.diagnosticKind, 'network', now(), entry);
+      }
+      if (entry?.diagnosticKind) sendTabState(details.tabId);
+    }, options);
+  } catch (error) {
+    console.warn('[BraveFox Chat Reliability] Passive listener unavailable:', error);
+  }
+
+  extension.tabs?.onRemoved?.addListener(tabId => {
+    tabStats.delete(tabId);
+  });
+
+  extension.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || (message.type !== PROTOCOL + ':get' && message.type !== PROTOCOL + ':own-429')) return undefined;
+    const senderUrl = sender?.url || sender?.tab?.url || '';
+    if (!/^https:\/\/chatgpt\.com(?:\/|$)/i.test(senderUrl)) return undefined;
+    const tabId = sender?.tab?.id;
+    counters(tabId);
+    const operation = async () => {
+      await sessionReady;
+      if (message.type === PROTOCOL + ':own-429') applyCooldown(parseRetryAfter(message.retryAfter) || 60000);
+      return { ok: true, snapshot: snapshot(tabId) };
+    };
+    // Chromium callback-style listener; Firefox background listener may return a Promise.
+    if (typeof sendResponse === 'function') {
+      operation().then(sendResponse, () => sendResponse({ ok: false }));
+      return true;
+    }
+    return operation();
+  });
+})();
+
+// === Archive -> Google rule source bridge (Chromium / Manifest V3) ===
+// The source of truth remains the installed scripts/google.js. This handler only
+// serves that exact bundled file to BraveFox's Archive and XCancel content scripts.
+// It does not replace the central URL-policy or wrestling-roster handlers above.
+(() => {
+    'use strict';
+
+    const MESSAGE_TYPE = 'BRAVEFOX_ARCHIVE_GET_GOOGLE_POLICY_V1';
+    const SOURCE_PATH = 'scripts/google.js';
+    const ALLOWED_REQUEST_HOSTS = new Set([
+        'web.archive.org', 'wayback.archive.org', 'archive.org',
+        'www.archive.org', 'xcancel.com', 'www.xcancel.com'
+    ]);
+    let sourcePromise = null;
+
+    function readBundledGoogleSource() {
+        if (!sourcePromise) {
+            sourcePromise = fetch(chrome.runtime.getURL(SOURCE_PATH))
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Could not read ${SOURCE_PATH} (HTTP ${response.status})`);
+                    }
+                    return response.text();
+                })
+                .catch(error => {
+                    // A transient failure must not permanently poison the source cache.
+                    sourcePromise = null;
+                    throw error;
+                });
+        }
+        return sourcePromise;
+    }
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (!message || message.type !== MESSAGE_TYPE) return false;
+
+        let senderHost = '';
+        try {
+            senderHost = new URL(sender?.url || sender?.tab?.url || '').hostname.toLowerCase();
+        } catch (e) {}
+        if (!ALLOWED_REQUEST_HOSTS.has(senderHost)) {
+            sendResponse({ ok: false, error: 'Archive policy request from unsupported origin' });
+            return false;
+        }
+
+        readBundledGoogleSource()
+            .then(source => sendResponse({ ok: true, source }))
+            .catch(error => {
+                console.warn('[BraveFox Archive] Cannot load Google policy source:', error);
+                sendResponse({ ok: false, error: String(error?.message || error) });
+            });
+        // Keep the MV3 message channel open until the bundled source is read.
+        return true;
+    });
+})();
