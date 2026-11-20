@@ -3386,7 +3386,12 @@ function bravefoxChatGptProtectedRouteKey(rawUrl) {
         if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'chatgpt.com') return '';
         const pathname = url.pathname.toLowerCase().replace(/\/+$/, '') || '/';
         const hash = decodeURIComponent(url.hash || '').toLowerCase();
-        if (pathname === '/library/d/6ab47ad73fe88191b5861b9b1f45132a' || pathname.startsWith('/library/d/6ab47ad73fe88191b5861b9b1f45132a/')) return 'library-protected-files';
+        const protectedId = '6ab47ad73fe88191b5861b9b1f45132a';
+        if (pathname === `/library/d/${protectedId}` || pathname.startsWith(`/library/d/${protectedId}/`)) return 'library-protected-files';
+        if ((pathname === '/space' || pathname.startsWith('/space/')) && (
+            pathname.split('/').includes(protectedId) ||
+            Array.from(url.searchParams.values()).some(value => String(value).toLowerCase().split(/[^a-z0-9]+/).includes(protectedId))
+        )) return 'library-protected-files';
         if (pathname === '/plugins' || pathname.startsWith('/plugins/')) return 'plugins';
         if (pathname === '/gpts' || pathname.startsWith('/gpts/')) return 'gpts';
         if (hash.startsWith('#settings/personalization')) return 'personalization';
