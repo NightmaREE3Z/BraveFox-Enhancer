@@ -1751,7 +1751,11 @@ const initializeExtension = async () => {
         hostsListForClosure = new Set(cachedHosts);
         console.log(`Loaded ${cachedHosts.length} cached hosts for immediate blocking`);
     }
-    
+
+    // Ensure the packaged baseline is active before waiting on remote sources.
+    await ensureBraveFoxCentralHostsReady();
+    await scanBraveFoxBlockedTabs('startup restoration');
+
     // Update blocklist and background data
     await updateBlocklist();
     await updateIncognitoBlockingRules();
@@ -1764,7 +1768,7 @@ const initializeExtension = async () => {
 };
 
 // Memory-optimized blocklist update (fetch all, dedupe, limit for rules, store full list in chunks)
-const updateBlocklist = async () => {
+const refreshBraveFoxBlocklist = async () => {
     console.log("Fetching hosts list...");
     const sources = [
         {
@@ -1855,6 +1859,18 @@ const updateBlocklist = async () => {
 
     allHosts = null;
     tryGarbageCollection();
+};
+
+// Coalesce startup and alarm refreshes so they cannot compete over cached chunks
+// or the limited dynamic-rule ID range. Recheck existing tabs after each refresh.
+let braveFoxBlocklistRefreshInFlight = null;
+const updateBlocklist = () => {
+    if (braveFoxBlocklistRefreshInFlight) return braveFoxBlocklistRefreshInFlight;
+    braveFoxBlocklistRefreshInFlight = (async () => {
+        await refreshBraveFoxBlocklist();
+        await scanBraveFoxBlockedTabs('blocklist refresh');
+    })().finally(() => { braveFoxBlocklistRefreshInFlight = null; });
+    return braveFoxBlocklistRefreshInFlight;
 };
 
 // Function to handle incognito blocking rules
@@ -2002,6 +2018,33 @@ const findBraveFoxBlockedUrlReason = url => {
 // Check if URL should be blocked (for immediate tab closure)
 const isBlockedUrl = url => Boolean(findBraveFoxBlockedUrlReason(url));
 
+// Rescan live tabs when the effective host policy changes. Do not trust a URL
+// captured before an asynchronous lookup: the user may have navigated away.
+const scanBraveFoxBlockedTabs = async (reason = 'host-policy refresh') => {
+    try {
+        const tabs = await chrome.tabs.query({});
+        let closedCount = 0;
+        for (const tab of tabs) {
+            if (!Number.isInteger(tab?.id) || closedTabs.has(tab.id)) continue;
+            const candidateUrl = tab?.pendingUrl || tab?.url || '';
+            if (!isBlockedUrl(candidateUrl)) continue;
+            let currentTab;
+            try { currentTab = await chrome.tabs.get(tab.id); } catch (_) { continue; }
+            const currentUrl = currentTab?.pendingUrl || currentTab?.url || '';
+            if (!isBlockedUrl(currentUrl) || closedTabs.has(tab.id)) continue;
+            closedTabs.add(tab.id);
+            const closed = await closeBlockedTabImmediately(currentUrl, tab.id);
+            if (closed) closedCount++;
+            else closedTabs.delete(tab.id);
+        }
+        if (closedCount) console.log(`Closed ${closedCount} blocked tab(s) after ${reason}.`);
+        return closedCount;
+    } catch (error) {
+        console.warn(`Blocked-tab rescan failed after ${reason}:`, error);
+        return 0;
+    }
+};
+
 // === Central URL policy bridge ================================================
 // Content scripts that already filter links/results can ask the background for the
 // same URL verdict BraveFox uses for top-level navigation. Keep the huge fetched
@@ -2047,6 +2090,7 @@ const mergeBraveFoxCentralBundledBaseline = async () => {
 // union the packaged baseline before returning a verdict.
 const ensureBraveFoxCentralHostsReady = async () => {
     if (braveFoxCentralHostsReadyPromise) return braveFoxCentralHostsReadyPromise;
+    if (braveFoxCentralBundledBaselineMerged && hostsListForClosure.size) return hostsListForClosure.size;
 
     braveFoxCentralHostsReadyPromise = (async () => {
         if (!hostsListForClosure.size) {
@@ -2067,6 +2111,28 @@ const ensureBraveFoxCentralHostsReady = async () => {
     });
 
     return braveFoxCentralHostsReadyPromise;
+};
+
+// A navigation can arrive before the worker has restored its cached/bundled
+// host lists. Recheck only the same live destination after restoration, rather
+// than closing a tab that has already navigated to a different (allowed) URL.
+const closeBraveFoxBlockedTabAfterHostsReady = async (tabId, candidateUrl) => {
+    if (!Number.isInteger(tabId) || tabId < 0 || !candidateUrl) return false;
+    try {
+        await ensureBraveFoxCentralHostsReady();
+        if (closedTabs.has(tabId)) return false;
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab) return false;
+        if (tab?.pendingUrl !== candidateUrl && tab?.url !== candidateUrl) return false;
+        if (!isBlockedUrl(candidateUrl)) return false;
+        closedTabs.add(tabId);
+        const closed = await closeBlockedTabImmediately(candidateUrl, tabId);
+        if (!closed) closedTabs.delete(tabId);
+        return closed;
+    } catch (error) {
+        console.warn('Deferred hosts check failed:', error);
+        return false;
+    }
 };
 
 // Match the Firefox Focus Master host semantics: a parent entry such as runway.com
@@ -2593,6 +2659,8 @@ const registerEventListeners = () => {
                         closedTabs.add(tab.id);
                         console.log(`New tab created with blocked URL, closing immediately: ${tabUrl}`);
                         closeBlockedTabImmediately(tabUrl, tab.id);
+                    } else if (tabUrl && !braveFoxCentralBundledBaselineMerged) {
+                        void closeBraveFoxBlockedTabAfterHostsReady(tab.id, tabUrl);
                     }
                 } catch (error) {
                     console.error('Error in onCreated listener:', error);
@@ -2645,6 +2713,8 @@ const registerEventListeners = () => {
                         closedTabs.add(tabId);
                         console.log(`Tab navigation to blocked URL detected, closing immediately: ${changeInfo.url}`);
                         closeBlockedTabImmediately(changeInfo.url, tabId);
+                    } else if (changeInfo.url && !braveFoxCentralBundledBaselineMerged) {
+                        void closeBraveFoxBlockedTabAfterHostsReady(tabId, changeInfo.url);
                     }
 
                     // Handle incognito mode updates
@@ -2690,6 +2760,8 @@ const registerEventListeners = () => {
                             closedTabs.add(details.tabId);
                             console.log(`WebNavigation: Blocking navigation before it starts: ${details.url}`);
                             closeBlockedTabImmediately(details.url, details.tabId);
+                        } else if (!braveFoxCentralBundledBaselineMerged) {
+                            void closeBraveFoxBlockedTabAfterHostsReady(details.tabId, details.url);
                         }
                     }
                 } catch (error) {
@@ -3892,29 +3964,53 @@ async function updateWrestlingRoster() {
 }
 // ===================================================================================
 
-// Set up hourly updates with memory optimization and tracking
-const hourlyUpdateId = setInterval(() => {
+// Use a persistent MV3 alarm for hourly updates. Worker suspension stops
+// setInterval callbacks, but an alarm wakes the worker to run this handler.
+const BRAVEFOX_HOURLY_UPDATE_ALARM = 'bravefoxHourlyUpdate_v1';
+const ensureBraveFoxHourlyUpdateAlarm = async () => {
+    try {
+        const current = await chrome.alarms.get(BRAVEFOX_HOURLY_UPDATE_ALARM);
+        if (!current || current.periodInMinutes !== 60) {
+            await chrome.alarms.create(BRAVEFOX_HOURLY_UPDATE_ALARM, { periodInMinutes: 60 });
+        }
+    } catch (error) {
+        console.warn('Could not schedule hourly update:', error);
+    }
+};
+
+const runBraveFoxScheduledUpdate = async () => {
     console.log('Running scheduled update...');
-    
-    // Check memory pressure before running heavy operations
+
     if (resourceTracker.checkMemoryPressure()) {
         console.warn('⚠️ High memory usage detected, performing cleanup before update...');
-        // Clean up caches before heavy operation
         hostsCache.cleanup();
         tryGarbageCollection();
     }
-    
-    updateBlocklist();
-    updateWrestlingRoster();
-    
-    // Cleanup interval to prevent memory leaks - more aggressive cleanup
-    if (closedTabs.size > 50) {  // Reduced threshold
+
+    try {
+        await updateBlocklist();
+    } catch (error) {
+        console.error('Scheduled blocklist update failed:', error);
+    }
+    try {
+        await updateWrestlingRoster();
+    } catch (error) {
+        console.error('Scheduled roster update failed:', error);
+    }
+
+    if (closedTabs.size > 50) {
         console.log('Cleaning up closedTabs set');
         closedTabs.clear();
     }
     tryGarbageCollection();
-}, 1 * 60 * 60 * 1000); // Update every hour
-resourceTracker.addInterval(hourlyUpdateId);
+};
+
+chrome.alarms.onAlarm.addListener(alarm => {
+    if (alarm?.name === BRAVEFOX_HOURLY_UPDATE_ALARM) {
+        void runBraveFoxScheduledUpdate();
+    }
+});
+void ensureBraveFoxHourlyUpdateAlarm();
 
 // Enhanced cleanup interval for memory management - more frequent and comprehensive
 const memoryCleanupId = setInterval(() => {
@@ -4010,6 +4106,8 @@ const bootManager = async () => {
                     await updateBlocklist();
                 }
                 
+                await ensureBraveFoxCentralHostsReady();
+                await scanBraveFoxBlockedTabs('service-worker wake');
                 await updateIncognitoBlockingRules();
                 updateWrestlingRoster();
                 await scanAndRedirectProtectedTabs();
