@@ -711,44 +711,30 @@
 
         saveOriginalAttr(img, 'src');
         saveOriginalAttr(img, 'srcset');
-        img.removeAttribute('srcset');
-        img.srcset = '';
-        img.setAttribute('src', fallback);
-        img.src = fallback;
+        // currentSrc can lag behind src until the browser selects the new image.
+        // Never write an identical attribute or recreate an empty srcset: both
+        // can retrigger our observer before currentSrc has caught up.
+        if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
+        if (attrSrc !== fallback) img.setAttribute('src', fallback);
     }
 
     function processImg(img) {
         if (!img || img.nodeType !== 1 || img.tagName !== 'IMG') return;
 
-        const srcsetChanged = cleanImgSrcset(img);
+        cleanImgSrcset(img);
         forceImgFallback(img);
-
-        // Encourage browser source re-selection after srcset cleanup.
-        if (srcsetChanged && img.parentElement && img.parentElement.tagName === 'PICTURE') {
-            const src = img.getAttribute('src');
-            if (src && !mentionsBadFormat(src)) {
-                img.src = src;
-            }
-        }
+        // Updating source/srcset already triggers native source selection.
+        // Reassigning img.src here only generates another watched mutation.
     }
 
     function processPicture(picture) {
         if (!picture || picture.nodeType !== 1 || picture.tagName !== 'PICTURE') return;
 
-        let disabledAnySource = false;
         for (const source of picture.querySelectorAll('source')) {
-            if (sourceLooksBad(source)) {
-                disablePictureSource(source);
-                disabledAnySource = true;
-            }
+            if (sourceLooksBad(source)) disablePictureSource(source);
         }
 
-        for (const img of picture.querySelectorAll('img')) {
-            processImg(img);
-            if (disabledAnySource) {
-                forceImgFallback(img);
-            }
-        }
+        for (const img of picture.querySelectorAll('img')) processImg(img);
     }
 
     function processSource(source) {
@@ -786,33 +772,83 @@
     }
 
     function processNode(node) {
-        if (!node || node.nodeType !== 1) return;
+        if (!node || node.nodeType !== 1 || !node.isConnected) return;
 
         const tag = node.tagName;
         if (tag === 'PICTURE') processPicture(node);
         else if (tag === 'SOURCE') processSource(node);
         else if (tag === 'IMG') processImg(node);
         else if (tag === 'LINK') processImagePreload(node);
-
-        if (node.querySelectorAll) {
-            const targets = node.querySelectorAll('picture, picture source, img, link[as="image"]');
-            for (const target of targets) {
-                const targetTag = target.tagName;
-                if (targetTag === 'PICTURE') processPicture(target);
-                else if (targetTag === 'SOURCE') processSource(target);
-                else if (targetTag === 'IMG') processImg(target);
-                else if (targetTag === 'LINK') processImagePreload(target);
-            }
-        }
     }
 
+    // Separate mutation collection from image processing. A TreeWalker lets
+    // even a large inserted subtree be visited in small, interruptible slices.
+    const imageTargets = new Set();
+    const imageScanRoots = new Set();
+    const IMAGE_WORK_BUDGET_MS = 6;
+    let imageWorkTimer = null;
+    let activeImageWalker = null;
     let scanQueued = false;
+
+    function scheduleImageWork() {
+        if (imageWorkTimer !== null) return;
+        imageWorkTimer = setTimeout(drainImageWork, 8);
+    }
+
+    function queueImageRoot(node) {
+        if (!node || node.nodeType !== 1 || !node.isConnected) return;
+        imageScanRoots.add(node);
+        scheduleImageWork();
+    }
+
+    function queueImageTarget(node) {
+        if (!node || node.nodeType !== 1 || !node.isConnected) return;
+        if (!['IMG', 'SOURCE', 'PICTURE', 'LINK'].includes(node.tagName)) return;
+        imageTargets.add(node);
+        scheduleImageWork();
+    }
+
+    function drainImageWork() {
+        imageWorkTimer = null;
+        const started = performance.now();
+        let steps = 0;
+        // Alternate targeted changes and subtree discovery so that neither can
+        // starve the other under continuous lazy loading.
+        while (steps++ < 180 && performance.now() - started < IMAGE_WORK_BUDGET_MS) {
+            if (imageTargets.size) {
+                const target = imageTargets.values().next().value;
+                imageTargets.delete(target);
+                try { processNode(target); } catch (e) { devLog('Image target processing failed:', e); }
+            }
+            if (activeImageWalker && !activeImageWalker.root.isConnected) activeImageWalker = null;
+            if (!activeImageWalker && imageScanRoots.size) {
+                const root = imageScanRoots.values().next().value;
+                imageScanRoots.delete(root);
+                if (root.isConnected) {
+                    activeImageWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+                    try { processNode(root); } catch (e) { devLog('Image root processing failed:', e); }
+                }
+            }
+            if (activeImageWalker) {
+                const node = activeImageWalker.nextNode();
+                if (node) {
+                    imageTargets.delete(node);
+                    try { processNode(node); } catch (e) { devLog('Image subtree processing failed:', e); }
+                } else {
+                    activeImageWalker = null;
+                }
+            }
+            if (!imageTargets.size && !imageScanRoots.size && !activeImageWalker) break;
+        }
+        if (imageTargets.size || imageScanRoots.size || activeImageWalker) scheduleImageWork();
+    }
+
     function queueScan() {
         if (scanQueued) return;
         scanQueued = true;
         const runner = () => {
             scanQueued = false;
-            processNode(document.documentElement || document.body);
+            queueImageRoot(document.documentElement || document.body);
             queueGoogleImagesOverlayTransform();
         };
 
@@ -830,25 +866,24 @@
             return;
         }
 
-        processNode(root);
-        queueGoogleImagesOverlayTransform();
-
         const observer = new MutationObserver((mutations) => {
-            let shouldScan = false;
+            let googleChanged = false;
 
             for (const mutation of mutations) {
                 if (mutation.type === 'childList') {
-                    for (const node of mutation.addedNodes) {
-                        processNode(node);
-                    }
-                    if (isGoogleImagesSearchPage()) shouldScan = true;
+                    for (const node of mutation.addedNodes) queueImageRoot(node);
+                    // A source added to an existing picture can change its selected image.
+                    if (mutation.target.tagName === 'PICTURE') queueImageTarget(mutation.target);
+                    googleChanged = true;
                 } else if (mutation.type === 'attributes') {
-                    processNode(mutation.target);
-                    shouldScan = true;
+                    queueImageTarget(mutation.target);
+                    googleChanged = true;
                 }
             }
 
-            if (shouldScan) queueScan();
+            // Only Google preview selection needs a page-level lookup. Normal
+            // image attribute mutations must never schedule a full document scan.
+            if (googleChanged) queueGoogleImagesOverlayTransform();
         });
 
         observer.observe(root, {
@@ -858,6 +893,8 @@
             attributeFilter: WATCHED_ATTRS
         });
 
+        queueImageRoot(root);
+        queueGoogleImagesOverlayTransform();
         window.addEventListener('DOMContentLoaded', queueScan, { once: true, passive: true });
         window.addEventListener('load', queueScan, { once: true, passive: true });
     }
